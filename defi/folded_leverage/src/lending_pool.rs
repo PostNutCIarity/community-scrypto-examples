@@ -5,6 +5,8 @@ use crate::user_management::*;
 
 // Should Lending Pool track how much has been borrowed?
 
+// Does this component need the main component to run methods or can it run by itself?
+
 blueprint! {
     struct LendingPool {
         // Vault for lending pool
@@ -18,9 +20,12 @@ blueprint! {
         fees: Vault,
         user_management_address: ComponentAddress,
     }
-
+    // Do you really need a proof to create a new lending pool?
+    // If you don't require a proof to create a new lending pool/deposit but you require proof to redeem then users are not gonna be happy
+    // Temporarily remove proof for now
+    // Creates a new user management component everytime 
     impl LendingPool {
-        pub fn new(user_auth: Proof, initial_funds: Bucket) -> ComponentAddress {
+        pub fn new(initial_funds: Bucket) -> ComponentAddress {
 
             assert_ne!(
                 borrow_resource_manager!(initial_funds.resource_address()).resource_type(), ResourceType::NonFungible,
@@ -57,12 +62,12 @@ blueprint! {
                 .no_initial_supply();
             
             //Inserting pool info into HashMap
+            let pool_resource_address = initial_funds.resource_address();
             let lending_pool: Bucket = initial_funds;
-
             let mut vaults: HashMap<ResourceAddress, Vault> = HashMap::new();
             let mut borrowed_vaults: HashMap<ResourceAddress, Vault> = HashMap::new();
-            vaults.insert(lending_pool.resource_address(), Vault::with_bucket(lending_pool));
-            borrowed_vaults.insert(lending_pool.resource_address(), Vault::new(tracking_tokens));
+            vaults.insert(pool_resource_address, Vault::with_bucket(lending_pool));
+            borrowed_vaults.insert(pool_resource_address, Vault::new(tracking_tokens));
 
             //Instantiate lending pool component
 
@@ -97,11 +102,7 @@ blueprint! {
         }
 
         // Require token resource address?
-        pub fn deposit(&mut self, user_auth: Proof, deposit_amount: Bucket) {
-
-            let user_management: UserManagement = self.user_management_address.into();
-            user_management.assert_user_exists(user_auth, String::from("User doesn't belong to this lending protocol."));
-
+        pub fn deposit(&mut self, deposit_amount: Bucket) {
 
             // Deposits collateral
             self.vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
@@ -147,7 +148,7 @@ blueprint! {
                 "[Withdraw]: Not enough liquidity available for the withdraw."
             );
             
-            self.mint_borrow(resource_address, amount);
+
             return vault.take(amount);
         }
 
@@ -155,7 +156,18 @@ blueprint! {
 
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management_address.into();
-            user_management.assert_user_exists(user_auth, String::from("User doesn't belong to this lending protocol."));
+
+            // Check if user exists
+            // You can use a reference instead of passing the proof
+            // Eventually you'll need to pass the proof through a component however
+            // Is there a way to update the user info without passing it through a component?
+            // Do we need to pass a proof to update the user info?
+            // Yes because what if someone else updates the user?
+            // To update the user, you need the badge authorization, not the proof.
+            // Why is it important that the badge is held within the user component?
+            // Who really has permission to update the user?
+            // What triggers the user to be updated?
+
 
             // Minting tracking tokens to be deposited to borrowed_vault to track borrows from this pool
             self.mint_borrow(token_address, amount);
@@ -193,9 +205,12 @@ blueprint! {
 
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management_address.into();
-            user_management.assert_user_exists(user_auth, String::from("User doesn't belong to this lending protocol."));
+
+            // Check if user exist
+            user_management.assert_user_exist(user_auth.clone());
 
             // Check if deposit withdrawal request has no lien
+            // Convert requirement of proof to NonFungibleId later
             user_management.check_lien(user_auth, token_address);
             
             // Withdrawing the amount of tokens owed to this liquidity provider
@@ -208,7 +223,9 @@ blueprint! {
         pub fn repay(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket) {
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management_address.into();
-            user_management.assert_user_exists(user_auth, String::from("User doesn't belong to this lending protocol."));
+
+            // Check if user exist
+
 
             // Burns the tracking token for borrowed amounts
             {let amount = amount.amount();
@@ -218,7 +235,7 @@ blueprint! {
             self.vaults.get_mut(&amount.resource_address()).unwrap().put(amount);
         }
 
-        pub fn check_liquidity(&self, token_address: ResourceAddress) -> Decimal {
+        pub fn check_liquidity(&mut self, token_address: ResourceAddress) -> Decimal {
 
             let vault: &mut Vault = self.vaults.get_mut(&token_address).unwrap();
             let borrowed_vault: &mut Vault = self.borrowed_vaults.get_mut(&token_address).unwrap();
@@ -226,7 +243,7 @@ blueprint! {
             return liquidity_amount
         }
 
-        pub fn check_utilization_rate(&self, token_address: ResourceAddress) -> Decimal {
+        pub fn check_utilization_rate(&mut self, token_address: ResourceAddress) -> Decimal {
             let vault: &mut Vault = self.vaults.get_mut(&token_address).unwrap();
             let borrowed_vault: &mut Vault = self.borrowed_vaults.get_mut(&token_address).unwrap();
             let liquidity_amount: Decimal = borrowed_vault.amount() / vault.amount();
@@ -234,13 +251,18 @@ blueprint! {
         }
 
         pub fn check_total_supplied(&self, token_address: ResourceAddress) -> Decimal {
-            let vault: &mut Vault = self.vaults.get_mut(&token_address).unwrap();
+            let vault = self.vaults.get(&token_address).unwrap();
             return vault.amount()
         }
         
         pub fn check_total_borrowed(&self, token_address: ResourceAddress) -> Decimal {
-            let borrowed_vault: &mut Vault = self.borrowed_vaults.get_mut(&token_address).unwrap();
+            let borrowed_vault = self.borrowed_vaults.get(&token_address).unwrap();
             return borrowed_vault.amount()
+        }
+
+        fn get_user(&self, user_auth: &Proof) -> NonFungibleId {
+            let user_id = user_auth.non_fungible::<User>().id();
+            return user_id
         }
 
     }

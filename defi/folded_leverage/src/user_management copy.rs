@@ -1,6 +1,6 @@
 use scrypto::prelude::*;
 
-#[derive(NonFungibleData)]
+#[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
 pub struct User {
     #[scrypto(mutable)]
     deposit_balance: HashMap<ResourceAddress, Decimal>,
@@ -14,6 +14,7 @@ blueprint! {
         user_badge_vault: Vault,
         // Collects User Address
         user_address: ResourceAddress,
+        user_data: HashMap<NonFungibleId, User>,
     }
 
     impl UserManagement {
@@ -35,6 +36,7 @@ blueprint! {
             return Self {
                 user_badge_vault: Vault::with_bucket(lending_protocol_user_badge),
                 user_address: user_address,
+                user_data: HashMap::new(),
             }
             .instantiate()
             .globalize()
@@ -64,6 +66,11 @@ blueprint! {
             return user
         }
 
+        pub fn get_user(&self, user_auth: Proof) -> NonFungibleId {
+            let user_id = user_auth.non_fungible::<User>().id();
+            return user_id
+        }
+
         pub fn check_lien(&self, user_auth: Proof, token_requested: ResourceAddress) {
             // Check if deposit withdrawal request has no lien
             let user_badge_data: User = user_auth.non_fungible().data();
@@ -84,10 +91,11 @@ blueprint! {
 
         // Adds the deposit balance
         // Checks if the user already a record of the resource or not
-        pub fn add_deposit_balance(&mut self, user_auth: Proof, address: ResourceAddress, amount: Decimal) {
+        pub fn add_deposit_balance(&mut self, user_auth: NonFungibleId, address: ResourceAddress, amount: Decimal) {
+            let user_id = self.user_data.get(&user_auth).unwrap();
 
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
-            let mut non_fungible_data: User = user_auth.non_fungible().data();
+            let mut non_fungible_data: User = get_user.non_fungible().data();
             if non_fungible_data.deposit_balance.contains_key(&address) {
                 *non_fungible_data.deposit_balance.get_mut(&address).unwrap() += amount;
             }     
