@@ -3,9 +3,13 @@ use crate::user_management::*;
 
 // Still need to figure out how to calculate fees and interest rate
 
-// Should Lending Pool track how much has been borrowed?
-
-// Does this component need the main component to run methods or can it run by itself?
+#[derive(NonFungibleData)]
+pub struct BalanceAmount {
+    pub amount_deposited: Decimal,
+    pub amount_borrowed: Decimal,
+    pub amount_redeemed: Decimal,
+    pub amount_repayed: Decimal,
+}
 
 blueprint! {
     struct LendingPool {
@@ -17,15 +21,17 @@ blueprint! {
         tracking_token_admin_badge: Vault,
         // Tracking tokens to be stored in borrowed_vaults whenever liquidity is removed from deposits
         tracking_token_address: ResourceAddress,
+        // TBD
         fees: Vault,
+        transient_vault: Vault,
+        transient_token_address: ResourceAddress,
         user_management_address: ComponentAddress,
+        access_vault: Vault,
     }
-    // Do you really need a proof to create a new lending pool?
-    // If you don't require a proof to create a new lending pool/deposit but you require proof to redeem then users are not gonna be happy
-    // Temporarily remove proof for now
-    // Creates a new user management component everytime 
+
+    // ResourceCheckFailure when calling this method independently
     impl LendingPool {
-        pub fn new(initial_funds: Bucket) -> ComponentAddress {
+        pub fn new(user_component_address: ComponentAddress, initial_funds: Bucket, access_badge: Bucket) -> ComponentAddress {
 
             assert_ne!(
                 borrow_resource_manager!(initial_funds.resource_address()).resource_type(), ResourceType::NonFungible,
@@ -35,7 +41,9 @@ blueprint! {
             assert!(
                 !initial_funds.is_empty(), 
                 "[Pool Creation]: Can't deposit an empty bucket."
-            );
+            ); 
+
+            let user_management_address: ComponentAddress = user_component_address;
 
             // Define the resource address of the fees collected
             let funds_resource_def = initial_funds.resource_address();
@@ -60,7 +68,23 @@ blueprint! {
                 .mintable(rule!(require(tracking_token_admin_badge.resource_address())), LOCKED)
                 .burnable(rule!(require(tracking_token_admin_badge.resource_address())), LOCKED)
                 .no_initial_supply();
-            
+
+            // Creates badge to authorizie to mint/burn transient token which is used as verification that the deposit/borrow/repay/redeem methods have been called
+            let transient_token = ResourceBuilder::new_fungible()
+            .divisibility(DIVISIBILITY_NONE)
+            .metadata("name", "Admin authority for BasicFlashLoan")
+            .initial_supply(1);
+
+            let transient_token_address = ResourceBuilder::new_fungible()
+            .metadata(
+                "name",
+                "Promise token - must be returned to be burned!",
+            )
+            .mintable(rule!(require(transient_token.resource_address())), LOCKED)
+            .burnable(rule!(require(access_badge.resource_address())), LOCKED)
+            .restrict_deposit(rule!(deny_all), LOCKED)
+            .no_initial_supply();
+
             //Inserting pool info into HashMap
             let pool_resource_address = initial_funds.resource_address();
             let lending_pool: Bucket = initial_funds;
@@ -70,14 +94,16 @@ blueprint! {
             borrowed_vaults.insert(pool_resource_address, Vault::new(tracking_tokens));
 
             //Instantiate lending pool component
-
             let lending_pool: ComponentAddress = Self {
                 vaults: vaults,
                 borrowed_vaults: borrowed_vaults,
                 tracking_token_address: tracking_tokens,
                 tracking_token_admin_badge: Vault::with_bucket(tracking_token_admin_badge),
                 fees: Vault::new(funds_resource_def),
-                user_management_address: UserManagement::new(),
+                transient_vault: Vault::with_bucket(transient_token),
+                transient_token_address: transient_token_address,
+                user_management_address: user_management_address,
+                access_vault: Vault::with_bucket(access_badge),
             }
             .instantiate().globalize();
             return lending_pool;
@@ -86,9 +112,7 @@ blueprint! {
         // Mint tracking tokens every time there's a borrow and puts it in the borrowed vault
         fn mint_borrow(&mut self, token_address: ResourceAddress, amount: Decimal) {
             let tracking_tokens_manager: &ResourceManager = borrow_resource_manager!(self.tracking_token_address);
-            let tracking_tokens: Bucket = self.tracking_token_admin_badge.authorize(|| {
-                tracking_tokens_manager.mint(amount)
-            });
+            let tracking_tokens: Bucket = self.tracking_token_admin_badge.authorize(|| {tracking_tokens_manager.mint(amount)});
             self.borrowed_vaults.get_mut(&token_address).unwrap().put(tracking_tokens)
         }
 
@@ -96,17 +120,24 @@ blueprint! {
         fn burn_borrow(&mut self, token_address: ResourceAddress, amount: Decimal) {
             let burn_amount: Bucket = self.borrowed_vaults.get_mut(&token_address).unwrap().take(amount);
             let tracking_tokens_manager: &ResourceManager = borrow_resource_manager!(self.tracking_token_address);
-            let tracking_tokens = self.tracking_token_admin_badge.authorize(|| {
-                tracking_tokens_manager.burn(burn_amount)
-            });
+            self.tracking_token_admin_badge.authorize(|| {tracking_tokens_manager.burn(burn_amount)});
         }
 
-        // Require token resource address?
-        pub fn deposit(&mut self, deposit_amount: Bucket) {
+        // Right now, anyone can simply deposit still without checking whether the user belongs to the lending protocol.
+        pub fn deposit(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Bucket) {
+            assert_eq!(token_address, deposit_amount.resource_address(), "Tokens must be the same.");
+            
+            let user_management: UserManagement = self.user_management_address.into();
 
+            let dec_deposit_amount = deposit_amount.amount();
+
+            let transient_token = self.transient_vault.authorize(|| {
+                borrow_resource_manager!(self.transient_token_address).mint(dec_deposit_amount)});
+
+            self.access_vault.authorize(|| {user_management.register_resource(transient_token.resource_address())});
+            user_management.add_deposit_balance(user_id, token_address, dec_deposit_amount, transient_token);
             // Deposits collateral
             self.vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
-
         }
 
         /// Gets the resource addresses of the tokens in this liquidity pool and returns them as a `Vec<ResourceAddress>`.
@@ -152,10 +183,16 @@ blueprint! {
             return vault.take(amount);
         }
 
-        pub fn borrow(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Decimal) -> Bucket {
+        pub fn borrow(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, borrow_amount: Decimal) -> Bucket {
+
+            // Maybe a check to make sure that the token request is the same lending pool token address?
+            
+            let user_management: UserManagement = self.user_management_address.into();
+
+            let transient_token = self.transient_vault.authorize(|| {
+                borrow_resource_manager!(self.transient_token_address).mint(borrow_amount)});
 
             // Check if the NFT belongs to this lending protocol.
-            let user_management: UserManagement = self.user_management_address.into();
 
             // Check if user exists
             // You can use a reference instead of passing the proof
@@ -168,13 +205,16 @@ blueprint! {
             // Who really has permission to update the user?
             // What triggers the user to be updated?
 
+            self.access_vault.authorize(|| {user_management.register_resource(transient_token.resource_address())});
+            // Commits state
+            user_management.add_borrow_balance(user_id, token_address, borrow_amount, transient_token);
 
             // Minting tracking tokens to be deposited to borrowed_vault to track borrows from this pool
-            self.mint_borrow(token_address, amount);
+            self.mint_borrow(token_address, borrow_amount);
 
-            // Withdrawing the amount of tokens owed to this liquidity provider
+            // Withdrawing the amount of tokens owed to this lender
             let addresses: Vec<ResourceAddress> = self.addresses();
-            let borrow_amount: Bucket = self.withdraw(addresses[0], self.vaults[&addresses[0]].amount() - amount);
+            let borrow_amount: Bucket = self.withdraw(addresses[0], self.vaults[&addresses[0]].amount() - borrow_amount);
 
             return borrow_amount
         }
@@ -201,42 +241,53 @@ blueprint! {
         /// 
         /// * `Bucket` - A Bucket of the share of the liquidity provider of the first token.
         /// * `Bucket` - A Bucket of the share of the liquidity provider of the second token.
-        pub fn redeem(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Decimal) -> Bucket {
+        pub fn redeem(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, redeem_amount: Decimal) -> Bucket {
 
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management_address.into();
 
-            // Check if user exist
-            user_management.assert_user_exist(user_auth.clone());
+            let transient_token = self.transient_vault.authorize(|| {
+                borrow_resource_manager!(self.transient_token_address).mint(redeem_amount)});
 
-            // Check if deposit withdrawal request has no lien
-            // Convert requirement of proof to NonFungibleId later
-            user_management.check_lien(user_auth, token_address);
-            
-            // Withdrawing the amount of tokens owed to this liquidity provider
+            self.access_vault.authorize(|| {user_management.register_resource(transient_token.resource_address())});
+
+            // Reduce deposit balance of the user
+            user_management.decrease_deposit_balance(user_id, token_address, redeem_amount, transient_token);
+
+            // Withdrawing the amount of tokens owed to this lender
             let addresses: Vec<ResourceAddress> = self.addresses();
-            let bucket: Bucket = self.withdraw(addresses[0], self.vaults[&addresses[0]].amount() - amount);
-
+            let bucket: Bucket = self.withdraw(addresses[0], self.vaults[&addresses[0]].amount() - redeem_amount);
             return bucket;
         }
-
-        pub fn repay(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket) {
+        
+        pub fn repay(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, repay_amount: Bucket) -> Bucket {
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management_address.into();
 
-            // Check if user exist
+            let dec_repay_amount = repay_amount.amount();
+            let transient_token = self.transient_vault.authorize(|| {
+                borrow_resource_manager!(self.transient_token_address).mint(dec_repay_amount)});
 
+            self.access_vault.authorize(|| {user_management.register_resource(transient_token.resource_address())});
 
             // Burns the tracking token for borrowed amounts
-            {let amount = amount.amount();
-            self.burn_borrow(token_address, amount);}
+            let amount = repay_amount.amount();
+            self.burn_borrow(token_address, amount);
+
+            // Commits state
+            // Need to fix this
+            let to_return_amount = user_management.decrease_borrow_balance(user_id, token_address, dec_repay_amount, transient_token);
+            let mut return_amount: Bucket = self.access_vault.take(0);
+            let to_return: Bucket = return_amount.take(to_return_amount);
 
             // Deposits the repaid loan back into the supply
-            self.vaults.get_mut(&amount.resource_address()).unwrap().put(amount);
+            self.vaults.get_mut(&repay_amount.resource_address()).unwrap().put(repay_amount);
+            to_return
         }
 
+        // Refactor to utils at some point
+        // Math is off (or maybe decimal doesn't have negative number?) 06/01/22
         pub fn check_liquidity(&mut self, token_address: ResourceAddress) -> Decimal {
-
             let vault: &mut Vault = self.vaults.get_mut(&token_address).unwrap();
             let borrowed_vault: &mut Vault = self.borrowed_vaults.get_mut(&token_address).unwrap();
             let liquidity_amount: Decimal = borrowed_vault.amount() - vault.amount();
@@ -250,6 +301,7 @@ blueprint! {
             return liquidity_amount
         }
 
+        // It's off, I think new_lending_pool method doesn't update correctly 06/01/22
         pub fn check_total_supplied(&self, token_address: ResourceAddress) -> Decimal {
             let vault = self.vaults.get(&token_address).unwrap();
             return vault.amount()
@@ -259,12 +311,6 @@ blueprint! {
             let borrowed_vault = self.borrowed_vaults.get(&token_address).unwrap();
             return borrowed_vault.amount()
         }
-
-        fn get_user(&self, user_auth: &Proof) -> NonFungibleId {
-            let user_id = user_auth.non_fungible::<User>().id();
-            return user_id
-        }
-
     }
 }
 
