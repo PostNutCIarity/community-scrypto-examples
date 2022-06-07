@@ -1,5 +1,4 @@
 use scrypto::prelude::*;
-use crate::lending_pool::BalanceAmount;
 
 // How to prevent people from simply being able to add the balance?
 
@@ -143,13 +142,16 @@ blueprint! {
                 nft_data.deposit_balance.insert(address, amount);
             };
 
-            self.access_vault.authorize(|| transient_token.burn());
-
+            // Added to check whether the transient token is being burnt
+            let burn: Result<(), &str> = Ok(self.access_vault.authorize(|| transient_token.burn()));
+            assert_eq!(burn.is_ok(), true);
+            
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
         }
 
         // Check and understand the logic here - 06/01/2022
+        // Does not decrease balance 06/02/22
         pub fn decrease_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal, transient_token: Bucket) -> Decimal {
 
             // Checks to see whether the transient token passed came from the lending pool
@@ -177,20 +179,19 @@ blueprint! {
             let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
 
             // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
-            let borrow_balance = *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
-            let remaining = nft_data.borrow_balance.get_mut(&address);
-            let mut remaining_result = match remaining {
-                Some(remaining) => *remaining,
-                None => Decimal::zero() 
-            };
+            let mut borrow_balance = *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
 
             if borrow_balance < redeem_amount {
-                let to_return = redeem_amount - remaining_result;
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+                let to_return = redeem_amount - borrow_balance;
+                // Will value be negative?
+                // Update 06/2/22 - tryna isolate why it's not updating redeem balance
+                let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+                *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) -= redeem_amount;
+                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
                 return to_return
             }
             else {
-                remaining_result -= redeem_amount;
+                borrow_balance -= redeem_amount;
                 self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
                 return Decimal::zero()
             };
@@ -270,16 +271,16 @@ blueprint! {
 
             // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
             let borrow_balance = *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
-            // Trying different versions to see which is better
-            let mut remaining: Decimal = nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()).clone();
 
             if borrow_balance < repay_amount {
-                let to_return = repay_amount - remaining;
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+                let to_return = repay_amount - borrow_balance;
+                let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+                *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) = Decimal::zero();
+                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
                 return to_return
             }
             else {
-                remaining -= repay_amount;
+                *nft_data.borrow_balance.get_mut(&address).unwrap() -= repay_amount;
                 self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
                 return Decimal::zero()
             };

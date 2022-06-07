@@ -1,2 +1,2 @@
-CALL_METHOD ComponentAddress("028dce27f2bfa6c3a20639f34fba79b13d2d859c4984a2bbf7ea42") "push_proof";
+CALL_METHOD ComponentAddress("02cae1455b2c7660eae94c2e89708df126397f5e9299d9f903ba5d") "create_transient_token";
 CALL_METHOD_WITH_ALL_RESOURCES ComponentAddress("021025cfda90adea21506170be47c67ec169e41dbbdd063d54d409") "deposit_batch";

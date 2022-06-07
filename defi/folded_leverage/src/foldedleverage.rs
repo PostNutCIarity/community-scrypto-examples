@@ -4,8 +4,9 @@ use crate::user_management::*;
 
 
 #[derive(NonFungibleData)]
-pub struct LoanDue {
+pub struct FlashLoan {
     pub amount_due: Decimal,
+    pub borrow_count: u8,
 }
 
 #[derive(NonFungibleData)]
@@ -47,7 +48,8 @@ blueprint! {
         // Vault that holds the authorization badge
         user_management_address: ComponentAddress,
         // Access badge to allow lending pool component to call a method from user management component. Folded Leverage component does not receive one.
-        access_badge: Vault,
+        access_vault: Vault,
+        access_badge_token_vault: Vault,
         access_badge_token_address: ResourceAddress,
     }
 
@@ -61,13 +63,14 @@ blueprint! {
                 .metadata("name", "Access Badge")
                 .initial_supply(1);   
                 
-            let access_badge_token = ResourceBuilder::new_fungible()
+            let mut access_badge_token = ResourceBuilder::new_fungible()
                 .metadata("name", "Access Badge")
                 .mintable(rule!(require(access_badge.resource_address())), LOCKED)
                 .burnable(rule!(require(access_badge.resource_address())), LOCKED)
-                .initial_supply(1);
+                .initial_supply(2);
 
             let access_badge_token_address = access_badge_token.resource_address();
+            let access_badge_token_user: Bucket = access_badge_token.take(1);
 
             // Creates badge to authorizie to mint/burn flash loan
             let flash_loan_token = ResourceBuilder::new_fungible()
@@ -83,16 +86,19 @@ blueprint! {
                 )
                 .mintable(rule!(require(flash_loan_token.resource_address())), LOCKED)
                 .burnable(rule!(require(flash_loan_token.resource_address())), LOCKED)
+                .updateable_non_fungible_data(rule!(require(flash_loan_token.resource_address())), LOCKED)
                 .restrict_deposit(rule!(deny_all), LOCKED)
                 .no_initial_supply();
+
             
             // Difference between using return Self and just Self?
             return Self {
                 lending_pools: HashMap::new(),
                 flash_loan_auth_vault: Vault::with_bucket(flash_loan_token),
                 flash_loan_resource_address: flash_loan_resource_address,
-                user_management_address: UserManagement::new(access_badge_token.resource_address(), access_badge_token),
-                access_badge: Vault::with_bucket(access_badge),
+                user_management_address: UserManagement::new(access_badge_token.resource_address(), access_badge_token_user),
+                access_vault: Vault::with_bucket(access_badge),
+                access_badge_token_vault: Vault::with_bucket(access_badge_token),
                 access_badge_token_address: access_badge_token_address,
             }
             .instantiate()
@@ -138,7 +144,8 @@ blueprint! {
 
         // Need to update user balance 06/01/2022
         // Not sure how to update deposit balance of the account given the transient token mechanic.
-        pub fn new_lending_pool(&mut self, user_auth: Proof, deposit: Bucket) {
+        // Updated so the balance will update, but have to think about the design further whether it makes sense 06/02/22
+        pub fn new_lending_pool(&mut self, user_auth: Proof, token_address: ResourceAddress, deposit: Bucket) {
 
             let user_management = self.user_management_address.into();
 
@@ -151,33 +158,31 @@ blueprint! {
             // Checking if user exists
             let user_id = self.get_user(&user_auth);
 
+            let deposit_amount = deposit.amount();
+
             let address: ResourceAddress = deposit.resource_address();
             // Sends an access badge to the lending pool
-            let access_badge_token = self.access_badge.authorize(|| borrow_resource_manager!(self.access_badge_token_address).mint(Decimal::one()));
-            let lending_pool: ComponentAddress = LendingPool::new(user_management, deposit, access_badge_token);
+            let access_badge_token = self.access_vault.authorize(|| borrow_resource_manager!(self.access_badge_token_address).mint(Decimal::one()));
+
+            let (lending_pool, transient_token): (ComponentAddress, Bucket) = LendingPool::new(user_management, deposit, access_badge_token);
+            // Moved here to see if this resolves dangling resource 06/02/22
+            let user_management: UserManagement = self.user_management_address.into();
+            // FoldedLeverage component registers the transient token is this bad? 06/02/22
+            // Is FoldedLeverage component even allowed to register resource?
+            let transient_token_address = transient_token.resource_address();
+            self.access_badge_token_vault.authorize(|| {user_management.register_resource(transient_token_address)});
+            user_management.add_deposit_balance(user_id, token_address, deposit_amount, transient_token);
+
             // Inserts into lending pool hashmap
             self.lending_pools.insert(
                 address,
                 lending_pool.into()
             );
+
         }
 
-        pub fn create_transient_token(&mut self) -> Bucket {
-
-            let transient_token = self.flash_loan_auth_vault.authorize(|| {
-                borrow_resource_manager!(self.flash_loan_resource_address).mint_non_fungible(
-                    &NonFungibleId::random(),
-                    LoanDue {
-                        amount_due: Decimal::zero(),
-                    },
-                )
-            });
-
-            transient_token
-        }
-
-        // Does it/should it matter where the state is updated?
-        pub fn deposit(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket) 
+        // ResourceCheckFailure - 06/02/22 Don't even remember my changes
+        pub fn deposit(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket)  
         {
             let address: ResourceAddress = amount.resource_address(); 
             // Checks if the user exists
@@ -199,12 +204,11 @@ blueprint! {
                     // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
                     // method to be general and allow for the possibility of the liquidity pool not being there.
                     info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", address);
-                    self.new_lending_pool(user_auth, amount)
+                    self.new_lending_pool(user_auth, token_address, amount)
                 }
             }
         }
 
-        // ResourceCheckFailure 06/01/2022
         pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> Bucket
         {
             // Checks if the user exists
@@ -226,10 +230,78 @@ blueprint! {
                     // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
                     // method to be general and allow for the possibility of the liquidity pool not being there.
                     info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
-                    let empty_bucket: Bucket = self.access_badge.take(0);
+                    let empty_bucket: Bucket = self.access_vault.take(0);
                     empty_bucket
                 }
             }
+        }
+
+        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Bucket) -> (Bucket, Bucket)
+        {
+            // Checks if the user exists
+            let user_id = self.get_user(&user_auth);
+
+            // Assert whether flash_loan bucket is empty
+            assert!(flash_loan.is_empty(), "Transient token bucket cannot be empty.");
+
+            // Assert that transient token came from this protocol
+            assert_eq!(flash_loan.resource_address(), self.flash_loan_resource_address, "Must send in the correct transient token.");
+
+            // Checks collateral ratio (will work at this at some point...)
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                    let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
+                    // Updates the flash loan token
+                    let borrow_count = 1;
+                    let return_flash_loan_token: Bucket = self.update_transient_token(flash_loan, &amount, &borrow_count);
+                    (return_borrow, return_flash_loan_token)
+                }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                    let empty_bucket: Bucket = self.access_vault.take(Decimal::zero());
+                    // How to make sure that no changes were made on the flash loan token?
+                    (empty_bucket, flash_loan)
+                }
+            }
+        }
+
+        pub fn create_transient_token(&mut self) -> Bucket {
+
+            let transient_token = self.flash_loan_auth_vault.authorize(|| {
+                borrow_resource_manager!(self.flash_loan_resource_address).mint_non_fungible(
+                    &NonFungibleId::random(),
+                    FlashLoan {
+                        amount_due: Decimal::zero(),
+                        borrow_count: 0,
+                    },
+                )
+            });
+
+            transient_token
+        }
+
+        fn update_transient_token(&mut self, flash_loan: Bucket, borrow_amount: &Decimal, borrow_count: &u8) -> Bucket {
+            let mut flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
+            flash_loan_data.amount_due += *borrow_amount;
+            flash_loan_data.borrow_count += borrow_count;
+            self.flash_loan_auth_vault.authorize(|| flash_loan.non_fungible().update_data(flash_loan_data));
+            return flash_loan
+        }
+
+        pub fn check_transient_data(&self, flash_loan: Bucket) -> Bucket {
+            let flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
+            let amount_due = flash_loan_data.amount_due;
+            let borrow_count = flash_loan_data.borrow_count;
+            let balance_statement = info!("The amount borrowed is: {}. The borrow count is {}", amount_due, borrow_count);
+            flash_loan
         }
 
         // Works but doesn't check lien and doesnt reduce your balance
@@ -237,6 +309,8 @@ blueprint! {
 
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
+
+            // Assert that transient token has been burnt?
 
             let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_reuqested);
             match optional_lending_pool {
@@ -251,13 +325,12 @@ blueprint! {
                     // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
                     // method to be general and allow for the possibility of the liquidity pool not being there.
                     info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", token_reuqested);
-                    let empty_bucket: Bucket = self.access_badge.take(0);
+                    let empty_bucket: Bucket = self.access_vault.take(0);
                     empty_bucket
                 }
             }
         }
 
-        // Works but doesn't reduce balance 06/01/22
         pub fn repay(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Bucket) -> Bucket {
 
             // Checks if the user exists
@@ -280,7 +353,41 @@ blueprint! {
                     // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
                     // method to be general and allow for the possibility of the liquidity pool not being there.
                     info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", token_requested);
-                    let empty_bucket: Bucket = self.access_badge.take(0);
+                    let empty_bucket: Bucket = self.access_vault.take(0);
+                    empty_bucket
+                }
+            }
+        }
+
+        // Think about design of flash repay
+        pub fn flash_repay(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Bucket, flash_loan: Bucket) -> Bucket {
+
+            // Checks if the user exists
+            let user_id = self.get_user(&user_auth);
+
+            // Checks if the token resources are the same
+            assert_eq!(token_requested, amount.resource_address(), "Token requested and token deposited must be the same.");
+
+            let flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
+            // Can there be a way in which flash loans are partially repaid?
+            assert!(amount.amount() >= flash_loan_data.amount_due, "Insufficient repayment given for your loan!");
+
+            // Repay fully or partial?
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        let return_bucket: Bucket = lending_pool.repay(user_id, token_requested, amount);
+                        self.flash_loan_auth_vault.authorize(|| flash_loan.burn());
+                        return_bucket
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", token_requested);
+                    let empty_bucket: Bucket = self.access_vault.take(0);
                     empty_bucket
                 }
             }
