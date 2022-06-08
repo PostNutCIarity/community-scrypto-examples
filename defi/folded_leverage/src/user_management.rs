@@ -1,4 +1,5 @@
 use scrypto::prelude::*;
+use crate::lending_pool::*;
 
 // How to prevent people from simply being able to add the balance?
 
@@ -8,6 +9,8 @@ pub struct User {
     deposit_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     borrow_balance: HashMap<ResourceAddress, Decimal>,
+    #[scrypto(mutable)]
+    collateral_ratio: HashMap<ResourceAddress, Decimal>,
 }
 
 
@@ -71,14 +74,20 @@ blueprint! {
                     User {
                         borrow_balance: HashMap::new(),
                         deposit_balance: HashMap::new(),
+                        collateral_ratio: HashMap::new(),
                     },
                 )
             });
             {let user_id: NonFungibleId = user_nft.non_fungible::<User>().id();
                 let user: User = user_nft.non_fungible().data();
                 self.user_record.insert(user_id, user);}
+
             // Returns NFT to user
             return user_nft
+        }
+
+        pub fn get_nft(&self) -> ResourceAddress {
+            return self.nft_address;
         }
 
         pub fn register_resource(&mut self, resource_address: ResourceAddress) {
@@ -131,6 +140,9 @@ blueprint! {
             // Verify transient token is provided the same amount as the deposit
             assert_eq!(amount, transient_token.amount(), "Incorrect amount.");
 
+            // Register lending pool
+
+
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
@@ -143,8 +155,8 @@ blueprint! {
             };
 
             // Added to check whether the transient token is being burnt
-            let burn: Result<(), &str> = Ok(self.access_vault.authorize(|| transient_token.burn()));
-            assert_eq!(burn.is_ok(), true);
+            self.access_vault.authorize(|| transient_token.burn());
+            
             
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
@@ -201,9 +213,13 @@ blueprint! {
 
 
         // Grabs the deposit balance of a specific token
-        pub fn check_token_deposit_balance(&self, user_auth: Proof, token_address: ResourceAddress) -> Decimal {
-            let user_badge_data: User = user_auth.non_fungible().data();
-            return *user_badge_data.deposit_balance.get(&token_address).unwrap();
+        fn check_token_deposit_balance(&self, user_id: &NonFungibleId, token_address: ResourceAddress) -> Decimal {
+            // Retrieves NonFungible ID
+            let resource_manager = borrow_resource_manager!(self.nft_address);
+            // Gets value of User
+            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+
+            return *nft_data.deposit_balance.get(&token_address).unwrap_or(&Decimal::zero());
         }
 
         pub fn deposit_resource_exists(&self, user_auth: Proof, address: ResourceAddress) -> bool {
@@ -236,9 +252,11 @@ blueprint! {
 
             if nft_data.borrow_balance.contains_key(&address) {
                 *nft_data.borrow_balance.get_mut(&address).unwrap() += amount;
+                *nft_data.collateral_ratio.get_mut(&address).unwrap() += self.get_current_collateral_ratio(&user_id, address, amount).unwrap();
             }
             else {
                 nft_data.borrow_balance.insert(address, amount);
+                *nft_data.collateral_ratio.get_mut(&address).unwrap() += self.get_current_collateral_ratio(&user_id, address, amount).unwrap();
             };
             
             self.access_vault.authorize(|| transient_token.burn());
@@ -293,13 +311,13 @@ blueprint! {
             }
         }
 
-        pub fn check_token_borrow_balance(&self, user_auth: Proof, token_address: ResourceAddress) -> Decimal {
+        fn check_token_borrow_balance(&self, user_id: &NonFungibleId, token_address: ResourceAddress) -> Decimal {
             // Retrieves NonFungible ID
-            let user_id = self.get_user(&user_auth);
+            let resource_manager = borrow_resource_manager!(self.nft_address);
             // Gets value of User
-            let balance = self.user_record.get(&user_id).unwrap();
-            // Is a HashMap of a HashMap a good design pattern?
-            return *balance.borrow_balance.get(&token_address).unwrap();
+            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+
+            return *nft_data.borrow_balance.get(&token_address).unwrap_or(&Decimal::zero());
         }
 
         fn assert_borrow_resource_exists(&self, user_id: &NonFungibleId, address: &ResourceAddress) {
@@ -308,16 +326,20 @@ blueprint! {
             return assert!(nft_data.borrow_balance.contains_key(&address), "This token resource does not exist in your borrow balance.")
         }
 
-        pub fn check_collateral_ratio(&self, user_auth: Proof, token_address: ResourceAddress) -> Decimal {
+        pub fn get_collateral_ratio(&self, user_id: NonFungibleId, token_address: ResourceAddress) -> Decimal {
 
-            let collateral_ratio: Decimal = self.check_token_borrow_balance(user_auth.clone(), token_address) / self.check_token_deposit_balance(user_auth, token_address);
+            let collateral_ratio: Decimal = self.check_token_borrow_balance(&user_id, token_address) / self.check_token_deposit_balance(&user_id, token_address);
             return collateral_ratio
         }
 
-        pub fn check_current_collateral_ratio(&self, user_auth: Proof, token_address: ResourceAddress, amount: Decimal) -> Decimal {
+        fn get_current_collateral_ratio(&self, user_id: &NonFungibleId, token_address: ResourceAddress, amount: Decimal) -> Option<Decimal> {
+            if self.check_token_borrow_balance(&user_id, token_address).is_zero() {
+                None
+            } else {
 
-            let collateral_ratio: Decimal = (self.check_token_borrow_balance(user_auth.clone(), token_address) + amount) / self.check_token_deposit_balance(user_auth, token_address);
-            return collateral_ratio
+            let collateral_ratio: Decimal = (self.check_token_borrow_balance(&user_id, token_address) + amount) / self.check_token_deposit_balance(&user_id, token_address);
+                Some(collateral_ratio)
+            }
         }
     }
 }

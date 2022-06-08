@@ -1,2 +1,2 @@
-CALL_METHOD ComponentAddress("02cae1455b2c7660eae94c2e89708df126397f5e9299d9f903ba5d") "create_transient_token";
+CALL_METHOD ComponentAddress("02cad28beda500406e75e54bd4d8cdeb9812cefea5c810f1238ebe") "create_transient_token";
 CALL_METHOD_WITH_ALL_RESOURCES ComponentAddress("021025cfda90adea21506170be47c67ec169e41dbbdd063d54d409") "deposit_batch";

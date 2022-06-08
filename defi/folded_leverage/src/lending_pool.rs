@@ -3,6 +3,15 @@ use crate::user_management::*;
 
 // Still need to figure out how to calculate fees and interest rate
 
+#[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
+pub struct User {
+    #[scrypto(mutable)]
+    deposit_balance: HashMap<ResourceAddress, Decimal>,
+    #[scrypto(mutable)]
+    borrow_balance: HashMap<ResourceAddress, Decimal>,
+    #[scrypto(mutable)]
+    collateral_ratio: HashMap<ResourceAddress, Decimal>,
+}
 
 blueprint! {
     struct LendingPool {
@@ -22,6 +31,8 @@ blueprint! {
         access_vault: Vault,
         max_borrow: Decimal,
         min_collateral_ratio: Decimal,
+        nft_address: Vec<ResourceAddress>,
+        nft_id: Vec<NonFungibleId>,
     }
 
     // ResourceCheckFailure when calling this method independently
@@ -105,6 +116,8 @@ blueprint! {
                 access_vault: Vault::with_bucket(access_badge),
                 max_borrow: dec!("0.75"),
                 min_collateral_ratio: dec!("1.0"),
+                nft_address: Vec::new(),
+                nft_id: Vec::new(),
             }
             .instantiate().globalize();
             return (lending_pool, transient_token_bucket);
@@ -122,6 +135,14 @@ blueprint! {
             let burn_amount: Bucket = self.borrowed_vaults.get_mut(&token_address).unwrap().take(amount);
             let tracking_tokens_manager: &ResourceManager = borrow_resource_manager!(self.tracking_token_address);
             self.tracking_token_admin_badge.authorize(|| {tracking_tokens_manager.burn(burn_amount)});
+        }
+
+        pub fn register_user(&mut self, nft_resource_address: ResourceAddress) {
+            self.nft_address.push(nft_resource_address);
+        }
+
+        pub fn register_user_id(&mut self, nft_id: NonFungibleId) {
+            self.nft_id.push(nft_id);
         }
 
         // Right now, anyone can simply deposit still without checking whether the user belongs to the lending protocol.
@@ -186,29 +207,22 @@ blueprint! {
 
         pub fn borrow(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, borrow_amount: Decimal) -> Bucket {
 
-            // 
+            
             let pool_resource_address = self.vaults.contains_key(&token_address);
-            assert_eq!(token_address, pool_resource_address, "Requested asset must be the same as the lending pool.");
+            assert!(pool_resource_address == true, "Requested asset must be the same as the lending pool.");
 
             let user_management: UserManagement = self.user_management_address.into();
             
+            let nft_resource = user_management.get_nft();
+
+            // Check minimum collateral ratio is met
+            let resource_manager = borrow_resource_manager!(nft_resource);
+            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             
+            assert!(nft_data.collateral_ratio.get(&token_address).unwrap() >= &self.min_collateral_ratio, "Min collateral ratio does not meet");
 
             let transient_token = self.transient_vault.authorize(|| {
                 borrow_resource_manager!(self.transient_token).mint(borrow_amount)});
-
-            // Check if the NFT belongs to this lending protocol.
-
-            // Check if user exists
-            // You can use a reference instead of passing the proof
-            // Eventually you'll need to pass the proof through a component however
-            // Is there a way to update the user info without passing it through a component?
-            // Do we need to pass a proof to update the user info?
-            // Yes because what if someone else updates the user?
-            // To update the user, you need the badge authorization, not the proof.
-            // Why is it important that the badge is held within the user component?
-            // Who really has permission to update the user?
-            // What triggers the user to be updated?
 
             self.access_vault.authorize(|| {user_management.register_resource(transient_token.resource_address())});
             // Commits state
@@ -315,6 +329,7 @@ blueprint! {
             let borrowed_vault = self.borrowed_vaults.get(&token_address).unwrap();
             return borrowed_vault.amount()
         }
+        
     }
 }
 

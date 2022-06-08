@@ -37,6 +37,7 @@ pub struct AccessBadge {
 
 // TO-DO:
 // * Build a design for flash-loan
+// * How to check collateral
 
 blueprint! {
     struct FoldedLeverage {
@@ -214,8 +215,6 @@ blueprint! {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
-            // Checks collateral ratio (will work at this at some point...)
-
             // Attempting to get the lending pool component associated with the provided address pair.
             let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
             match optional_lending_pool {
@@ -236,18 +235,13 @@ blueprint! {
             }
         }
 
-        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Bucket) -> (Bucket, Bucket)
+        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Proof) -> Bucket
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
-            // Assert whether flash_loan bucket is empty
-            assert!(flash_loan.is_empty(), "Transient token bucket cannot be empty.");
-
-            // Assert that transient token came from this protocol
+            // Assert that flash transient token came from this protocol
             assert_eq!(flash_loan.resource_address(), self.flash_loan_resource_address, "Must send in the correct transient token.");
-
-            // Checks collateral ratio (will work at this at some point...)
 
             // Attempting to get the lending pool component associated with the provided address pair.
             let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
@@ -257,8 +251,8 @@ blueprint! {
                     let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
                     // Updates the flash loan token
                     let borrow_count = 1;
-                    let return_flash_loan_token: Bucket = self.update_transient_token(flash_loan, &amount, &borrow_count);
-                    (return_borrow, return_flash_loan_token)
+                    self.update_transient_token(flash_loan, &amount, &borrow_count);
+                    return_borrow
                 }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
                     // In here we are creating a new liquidity pool for this token pair since we failed to find an 
@@ -268,7 +262,7 @@ blueprint! {
                     info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
                     let empty_bucket: Bucket = self.access_vault.take(Decimal::zero());
                     // How to make sure that no changes were made on the flash loan token?
-                    (empty_bucket, flash_loan)
+                    empty_bucket
                 }
             }
         }
@@ -288,20 +282,18 @@ blueprint! {
             transient_token
         }
 
-        fn update_transient_token(&mut self, flash_loan: Bucket, borrow_amount: &Decimal, borrow_count: &u8) -> Bucket {
+        fn update_transient_token(&mut self, flash_loan: Proof, borrow_amount: &Decimal, borrow_count: &u8) {
             let mut flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
             flash_loan_data.amount_due += *borrow_amount;
             flash_loan_data.borrow_count += borrow_count;
             self.flash_loan_auth_vault.authorize(|| flash_loan.non_fungible().update_data(flash_loan_data));
-            return flash_loan
         }
 
-        pub fn check_transient_data(&self, flash_loan: Bucket) -> Bucket {
+        pub fn check_transient_data(&self, flash_loan: Proof) {
             let flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
             let amount_due = flash_loan_data.amount_due;
             let borrow_count = flash_loan_data.borrow_count;
             let balance_statement = info!("The amount borrowed is: {}. The borrow count is {}", amount_due, borrow_count);
-            flash_loan
         }
 
         // Works but doesn't check lien and doesnt reduce your balance
@@ -371,6 +363,8 @@ blueprint! {
             let flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
             // Can there be a way in which flash loans are partially repaid?
             assert!(amount.amount() >= flash_loan_data.amount_due, "Insufficient repayment given for your loan!");
+
+            // Checks if flash loan bucket is empty
 
             // Repay fully or partial?
             let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
