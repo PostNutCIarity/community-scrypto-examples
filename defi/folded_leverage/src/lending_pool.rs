@@ -219,7 +219,7 @@ blueprint! {
             let resource_manager = borrow_resource_manager!(nft_resource);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             
-            assert!(nft_data.collateral_ratio.get(&token_address).unwrap() >= &self.min_collateral_ratio, "Min collateral ratio does not meet");
+
 
             let transient_token = self.transient_vault.authorize(|| {
                 borrow_resource_manager!(self.transient_token).mint(borrow_amount)});
@@ -227,7 +227,7 @@ blueprint! {
             self.access_vault.authorize(|| {user_management.register_resource(transient_token.resource_address())});
             // Commits state
             user_management.add_borrow_balance(user_id, token_address, borrow_amount, transient_token);
-
+            assert!(nft_data.collateral_ratio.get(&token_address).unwrap_or(&Decimal::zero()) >= &self.min_collateral_ratio, "Min collateral ratio does not meet");
             // Minting tracking tokens to be deposited to borrowed_vault to track borrows from this pool
             self.mint_borrow(token_address, borrow_amount);
 

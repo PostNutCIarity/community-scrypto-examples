@@ -3,7 +3,7 @@ use crate::lending_pool::*;
 use crate::user_management::*;
 
 
-#[derive(NonFungibleData)]
+#[derive(NonFungibleData, Debug)]
 pub struct FlashLoan {
     pub amount_due: Decimal,
     pub borrow_count: u8,
@@ -210,7 +210,7 @@ blueprint! {
             }
         }
 
-        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> Bucket
+        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> (Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -221,7 +221,17 @@ blueprint! {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
                         let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
-                        return_borrow
+                        let transient_token = self.flash_loan_auth_vault.authorize(|| {
+                            borrow_resource_manager!(self.flash_loan_resource_address).mint_non_fungible(
+                                &NonFungibleId::random(),
+                                FlashLoan {
+                                    amount_due: amount,
+                                    borrow_count: 1,
+                                },
+                            )
+                        });
+                        
+                        (return_borrow, transient_token)
                     }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
                     // In here we are creating a new liquidity pool for this token pair since we failed to find an 
@@ -229,8 +239,9 @@ blueprint! {
                     // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
                     // method to be general and allow for the possibility of the liquidity pool not being there.
                     info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
-                    let empty_bucket: Bucket = self.access_vault.take(0);
-                    empty_bucket
+                    let empty_bucket1: Bucket = self.access_vault.take(0);
+                    let empty_bucket2: Bucket = self.access_vault.take(0);
+                    (empty_bucket1, empty_bucket2)
                 }
             }
         }
@@ -251,7 +262,7 @@ blueprint! {
                     let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
                     // Updates the flash loan token
                     let borrow_count = 1;
-                    self.update_transient_token(flash_loan, &amount, &borrow_count);
+                    self.update_transient_token(&flash_loan, &amount, &borrow_count);
                     return_borrow
                 }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
@@ -278,11 +289,10 @@ blueprint! {
                     },
                 )
             });
-
             transient_token
         }
 
-        fn update_transient_token(&mut self, flash_loan: Proof, borrow_amount: &Decimal, borrow_count: &u8) {
+        fn update_transient_token(&mut self, flash_loan: &Proof, borrow_amount: &Decimal, borrow_count: &u8) {
             let mut flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
             flash_loan_data.amount_due += *borrow_amount;
             flash_loan_data.borrow_count += borrow_count;

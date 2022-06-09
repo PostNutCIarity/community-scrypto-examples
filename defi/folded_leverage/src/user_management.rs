@@ -99,19 +99,9 @@ blueprint! {
             return self.user_record.contains_key(&user_id)
         }
 
-        fn get_user(&self, user_auth: &Proof) -> NonFungibleId {
-            let user_id = user_auth.non_fungible::<User>().id();
-            return user_id
-        }
-
         fn assert_user_exist(&self, user_id: &NonFungibleId) {
             assert!(self.find_user(user_id), "User does not exist.");
         }        
-
-        fn get_deposit_keys(&self, user_auth: &Proof) -> Vec<ResourceAddress> {
-            let user_badge_data: User = user_auth.non_fungible().data();
-            return user_badge_data.deposit_balance.keys().cloned().collect::<Vec<ResourceAddress>>();
-        }
 
         // Need help on error regarding the unwrap 06/01/22
         // Need to think about this more whether it needs to equal exactly zero
@@ -251,12 +241,12 @@ blueprint! {
             let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
 
             if nft_data.borrow_balance.contains_key(&address) {
-                *nft_data.borrow_balance.get_mut(&address).unwrap() += amount;
-                *nft_data.collateral_ratio.get_mut(&address).unwrap() += self.get_current_collateral_ratio(&user_id, address, amount).unwrap();
+                *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) += amount;
+                *nft_data.collateral_ratio.get_mut(&address).unwrap_or(&mut Decimal::zero()) += self.get_current_collateral_ratio(&user_id, address, amount).unwrap_or(Decimal::zero());
             }
             else {
                 nft_data.borrow_balance.insert(address, amount);
-                *nft_data.collateral_ratio.get_mut(&address).unwrap() += self.get_current_collateral_ratio(&user_id, address, amount).unwrap();
+                *nft_data.collateral_ratio.get_mut(&address).unwrap_or(&mut Decimal::zero()) += self.get_current_collateral_ratio(&user_id, address, amount).unwrap_or(Decimal::zero());
             };
             
             self.access_vault.authorize(|| transient_token.burn());
