@@ -1,18 +1,26 @@
 use scrypto::prelude::*;
 use crate::lending_pool::*;
 
-// How to prevent people from simply being able to add the balance?
-
+// Should NFTs be given for individual balances instead of having all balances in one NFT?
 #[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
 pub struct User {
     #[scrypto(mutable)]
     deposit_balance: HashMap<ResourceAddress, Decimal>,
+    #[scrypto(mutable)]
+    collateral_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     borrow_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     collateral_ratio: HashMap<ResourceAddress, Decimal>,
 }
 
+// Users who know their NFT ID has access to this component to view their data.
+// Users can not change their data. Only interacting through the pools can.
+// Changing deposit, borrow, and colalteral balance data can only be triggered through interacting with the pool.
+// The Pool mints a transient token that will be sent to the User Management component.
+// The User Management component has a protected method through which the pool can call to register the resource address
+// Of the transient token. The transient token that is passed to the method call in the User Management component
+// is then checked to ensure that the transient token was indeed minted from the pool.
 
 blueprint! {
     struct UserManagement {
@@ -74,6 +82,7 @@ blueprint! {
                     User {
                         borrow_balance: HashMap::new(),
                         deposit_balance: HashMap::new(),
+                        collateral_balance: HashMap::new(),
                         collateral_ratio: HashMap::new(),
                     },
                 )
@@ -153,7 +162,6 @@ blueprint! {
         }
 
         // Check and understand the logic here - 06/01/2022
-        // Does not decrease balance 06/02/22
         pub fn decrease_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal, transient_token: Bucket) -> Decimal {
 
             // Checks to see whether the transient token passed came from the lending pool
@@ -185,8 +193,6 @@ blueprint! {
 
             if borrow_balance < redeem_amount {
                 let to_return = redeem_amount - borrow_balance;
-                // Will value be negative?
-                // Update 06/2/22 - tryna isolate why it's not updating redeem balance
                 let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
                 *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) -= redeem_amount;
                 self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
@@ -239,20 +245,22 @@ blueprint! {
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-
+            // Need to figure out why the collateral ratio is not updated 06/09/22
             if nft_data.borrow_balance.contains_key(&address) {
                 *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) += amount;
-                *nft_data.collateral_ratio.get_mut(&address).unwrap_or(&mut Decimal::zero()) += self.get_current_collateral_ratio(&user_id, address, amount).unwrap_or(Decimal::zero());
-            }
-            else {
+                let collateral_ratio: Decimal = self.get_current_collateral_ratio(&user_id, address, amount).unwrap_or(Decimal::zero());
+                *nft_data.collateral_ratio.get_mut(&address).unwrap_or(&mut Decimal::zero()) += collateral_ratio;
+            } else {
                 nft_data.borrow_balance.insert(address, amount);
-                *nft_data.collateral_ratio.get_mut(&address).unwrap_or(&mut Decimal::zero()) += self.get_current_collateral_ratio(&user_id, address, amount).unwrap_or(Decimal::zero());
+                let collateral_ratio: Decimal = self.get_current_collateral_ratio(&user_id, address, amount).unwrap_or(Decimal::zero());
+                nft_data.collateral_ratio.insert(address, collateral_ratio);
             };
             
             self.access_vault.authorize(|| transient_token.burn());
 
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+            self.add_collateral_ratio(&user_id, address);
         }
 
         pub fn decrease_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, repay_amount: Decimal, transient_token: Bucket) -> Decimal {
@@ -294,6 +302,13 @@ blueprint! {
             };
         }
 
+        fn add_collateral_ratio(&mut self, user_id: &NonFungibleId, address: ResourceAddress) {
+            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+            *nft_data.collateral_ratio.get_mut(&address).unwrap_or(&mut Decimal::zero()) += self.get_collateral_ratio(user_id.clone(), address);
+            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+        }
+
         pub fn check_borrow_balance(&self, user_auth: Proof) { // This way or check_deposit_balance?
             let user_badge_data: User = user_auth.non_fungible().data();
             for (token, amount) in &user_badge_data.borrow_balance {
@@ -316,9 +331,146 @@ blueprint! {
             return assert!(nft_data.borrow_balance.contains_key(&address), "This token resource does not exist in your borrow balance.")
         }
 
-        pub fn get_collateral_ratio(&self, user_id: NonFungibleId, token_address: ResourceAddress) -> Decimal {
+        pub fn convert_deposit_to_collateral(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
 
-            let collateral_ratio: Decimal = self.check_token_borrow_balance(&user_id, token_address) / self.check_token_deposit_balance(&user_id, token_address);
+            // Checks to see whether the transient token passed came from the lending pool
+            assert!(
+                self.allowed_resource.contains(&transient_token.resource_address()), 
+                "Incorrect resource passed in for loan terms"
+            );
+
+            // Verify transient token is provided the same amount as the deposit
+            assert_eq!(
+                amount, transient_token.amount(),
+                "Incorrect amount.");
+
+            // If the User already has the resource address, adds to the balance. If not, registers new resource address.
+            // Converts the deposit to collateral balance by subtracting from deposit and adding to collateral balance.
+            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+
+            if nft_data.collateral_balance.contains_key(&address) {
+                *nft_data.deposit_balance.get_mut(&address).unwrap() -= amount;
+                *nft_data.collateral_balance.get_mut(&address).unwrap() += amount;
+            } else {
+                *nft_data.deposit_balance.get_mut(&address).unwrap() -= amount;
+                nft_data.collateral_balance.insert(address, amount);
+            };
+
+            self.access_vault.authorize(|| transient_token.burn());
+            
+            
+            // Commits state
+            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+        }
+
+        pub fn convert_collateral_to_deposit(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
+
+            // Checks to see whether the transient token passed came from the lending pool
+            assert!(
+                self.allowed_resource.contains(&transient_token.resource_address()), 
+                "Incorrect resource passed in for loan terms"
+            );
+
+            // Verify transient token is provided the same amount as the deposit
+            assert_eq!(amount, transient_token.amount(), "Incorrect amount.");
+
+
+            // If the User already has the resource address, adds to the balance. If not, registers new resource address.
+            // Converts the deposit to collateral balance by subtracting from deposit and adding to collateral balance.
+            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+
+            if nft_data.deposit_balance.contains_key(&address) {
+                *nft_data.collateral_balance.get_mut(&address).unwrap() -= amount;
+                *nft_data.deposit_balance.get_mut(&address).unwrap() += amount;
+            }
+            else {
+                *nft_data.collateral_balance.get_mut(&address).unwrap() -= amount;
+                nft_data.deposit_balance.insert(address, amount);
+            };
+
+            self.access_vault.authorize(|| transient_token.burn());
+            
+            // Commits state
+            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+        }
+
+        pub fn add_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
+
+            // Checks to see whether the transient token passed came from the lending pool
+            assert!(
+                self.allowed_resource.contains(&transient_token.resource_address()), 
+                "Incorrect resource passed in for loan terms"
+            );
+
+            // Verify transient token is provided the same amount as the deposit
+            assert_eq!(amount, transient_token.amount(), "Incorrect amount.");
+
+
+            // If the User already has the resource address, adds to the balance. If not, registers new resource address.
+            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+
+            if nft_data.collateral_balance.contains_key(&address) {
+                *nft_data.collateral_balance.get_mut(&address).unwrap() += amount;
+            }
+            else {
+                nft_data.collateral_balance.insert(address, amount);
+            };
+
+            self.access_vault.authorize(|| transient_token.burn());
+            
+            
+            // Commits state
+            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+        }
+
+        pub fn decrease_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal, transient_token: Bucket) -> Decimal {
+
+            // Checks to see whether the transient token passed came from the lending pool
+            assert!(
+                self.allowed_resource.contains(&transient_token.resource_address()), 
+                "Incorrect resource passed in for loan terms"
+            );
+
+            // Asserts user exists
+            self.assert_user_exist(&user_id);
+            
+            // Check lien - 06/01/22 - Make sure this makes sense
+            self.check_lien(&user_id, &address);
+
+            // Asserts that the user must have an existing borrow balance of the resource.
+            self.assert_deposit_resource_exists(&user_id, &address);
+
+            // Verify transient token is provided the same amount as the deposit
+            assert_eq!(redeem_amount, transient_token.amount(), "Incorrect amount.");
+
+            self.access_vault.authorize(|| transient_token.burn());
+
+            // Retrieves resource manager to find user 
+            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+
+            // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
+            let mut borrow_balance = *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
+
+            if borrow_balance < redeem_amount {
+                let to_return = redeem_amount - borrow_balance;
+                let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+                *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) -= redeem_amount;
+                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
+                return to_return
+            }
+            else {
+                borrow_balance -= redeem_amount;
+                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+                return Decimal::zero()
+            };
+        }
+
+        pub fn get_collateral_ratio(&self, user_id: NonFungibleId, token_address: ResourceAddress) -> Decimal {
+            let collateral_ratio: Decimal = self.check_token_deposit_balance(&user_id, token_address) / self.check_token_borrow_balance(&user_id, token_address);
             return collateral_ratio
         }
 
@@ -326,9 +478,9 @@ blueprint! {
             if self.check_token_borrow_balance(&user_id, token_address).is_zero() {
                 None
             } else {
-
-            let collateral_ratio: Decimal = (self.check_token_borrow_balance(&user_id, token_address) + amount) / self.check_token_deposit_balance(&user_id, token_address);
-                Some(collateral_ratio)
+                let collateral = self.check_token_deposit_balance(&user_id, token_address);
+                let loan = self.check_token_borrow_balance(&user_id, token_address) + amount;
+                Some(collateral / loan)
             }
         }
     }

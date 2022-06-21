@@ -1,6 +1,8 @@
 use scrypto::prelude::*;
 use crate::lending_pool::*;
+use crate::collateral_pool::*;
 use crate::user_management::*;
+use crate::user_management::User;
 
 
 #[derive(NonFungibleData, Debug)]
@@ -35,14 +37,26 @@ pub struct AccessBadge {
 // * Interest dynamic adjustment strategy
 // * Upgradability
 
+// Design features:
+// * Transient tokens are used to make sure no one can just access the User Management component
+// * Only way to change NFT data is by calling methods from the pool that would give cause to 
+// to changing the NFT data i.e depositing, borrowing, etc.
+// * Pool methods will create a transient token and calls a protected method from the User Management compononet
+// to register the resource address of the transient token
+// * User Management component is now aware that a transient token from the Pool has been created
+// * The transient token passed to the User Management component has to be the same one created from the Pool(s).
+
 // TO-DO:
 // * Build a design for flash-loan
 // * How to check collateral
+// * See why vault can't be empty
 
 blueprint! {
     struct FoldedLeverage {
 
         lending_pools: HashMap<ResourceAddress, LendingPool>,
+        collateral_pools: HashMap<ResourceAddress, CollateralPool>,
+        collateral_pool_address: HashMap<ResourceAddress, ComponentAddress>,
         //Flash loan
         flash_loan_auth_vault: Vault,
         flash_loan_resource_address: ResourceAddress,
@@ -95,6 +109,8 @@ blueprint! {
             // Difference between using return Self and just Self?
             return Self {
                 lending_pools: HashMap::new(),
+                collateral_pools: HashMap::new(),
+                collateral_pool_address: HashMap::new(),
                 flash_loan_auth_vault: Vault::with_bucket(flash_loan_token),
                 flash_loan_resource_address: flash_loan_resource_address,
                 user_management_address: UserManagement::new(access_badge_token.resource_address(), access_badge_token_user),
@@ -164,9 +180,9 @@ blueprint! {
             let address: ResourceAddress = deposit.resource_address();
             // Sends an access badge to the lending pool
             let access_badge_token = self.access_vault.authorize(|| borrow_resource_manager!(self.access_badge_token_address).mint(Decimal::one()));
-
+            
             let (lending_pool, transient_token): (ComponentAddress, Bucket) = LendingPool::new(user_management, deposit, access_badge_token);
-            // Moved here to see if this resolves dangling resource 06/02/22
+
             let user_management: UserManagement = self.user_management_address.into();
             // FoldedLeverage component registers the transient token is this bad? 06/02/22
             // Is FoldedLeverage component even allowed to register resource?
@@ -182,8 +198,48 @@ blueprint! {
 
         }
 
-        // ResourceCheckFailure - 06/02/22 Don't even remember my changes
-        pub fn deposit(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket)  
+        pub fn new_collateral_pool(&mut self, user_auth: Proof, token_address: ResourceAddress, collateral: Bucket) {
+
+            let user_management = self.user_management_address.into();
+
+            // Checking if a lending pool already exists for this token
+            // self.assert_pool_doesnt_exists(
+                // collateral.resource_address(), 
+                // String::from("New Collateral Pool")
+            // );
+
+            // Checking if user exists
+            let user_id = self.get_user(&user_auth);
+
+            let deposit_amount = collateral.amount();
+
+            let address: ResourceAddress = collateral.resource_address();
+            // Sends an access badge to the collateral pool
+            let access_badge_token = self.access_vault.authorize(|| borrow_resource_manager!(self.access_badge_token_address).mint(Decimal::one()));
+
+            let (collateral_pool, transient_token): (ComponentAddress, Bucket) = CollateralPool::new(user_management, collateral, access_badge_token);
+
+            let user_management: UserManagement = self.user_management_address.into();
+            // FoldedLeverage component registers the transient token is this bad? 06/02/22
+            // Is FoldedLeverage component even allowed to register resource?
+            let transient_token_address = transient_token.resource_address();
+            self.access_badge_token_vault.authorize(|| {user_management.register_resource(transient_token_address)});
+            user_management.add_deposit_balance(user_id, token_address, deposit_amount, transient_token);
+
+            // Inserts into lending pool hashmap
+            self.collateral_pools.insert(
+                address,
+                collateral_pool.into()
+            );
+
+            self.collateral_pool_address.insert(
+                address,
+                collateral_pool.into()
+            );
+
+        }
+
+        pub fn deposit_supply(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket)  
         {
             let address: ResourceAddress = amount.resource_address(); 
             // Checks if the user exists
@@ -210,7 +266,105 @@ blueprint! {
             }
         }
 
-        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> (Bucket, Bucket)
+        pub fn deposit_collateral(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket)  
+        {
+            let address: ResourceAddress = amount.resource_address(); 
+            // Checks if the user exists
+            let user_id = self.get_user(&user_auth);
+
+            // Checks if the token resources are the same
+            assert_eq!(token_address, amount.resource_address(), "Token requested and token deposited must be the same.");
+            
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_collateral_pool: Option<&CollateralPool> = self.collateral_pools.get(&address);
+            match optional_collateral_pool {
+                Some (collateral_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", address);
+                        collateral_pool.deposit(user_id, token_address, amount);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", address);
+                    self.new_collateral_pool(user_auth, token_address, amount)
+                }
+            }
+        }
+
+        // Converts the deposit supply to a collateral supply
+        pub fn convert_to_collateral(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal)
+        {
+            // Checks if the user exists
+            let user_id = self.get_user(&user_auth);
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        lending_pool.convert_to_collateral(user_id, token_requested, amount);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                }
+            }
+        }
+        
+        // Converts the collateral supply to deposit supply
+        pub fn convert_to_deposit(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal)
+        {
+            // Checks if the user exists
+            let user_id = self.get_user(&user_auth);
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_collateral_pool: Option<&CollateralPool> = self.collateral_pools.get(&token_requested);
+            match optional_collateral_pool {
+                Some (collateral_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        collateral_pool.convert_to_deposit(user_id, token_requested, amount);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                }
+            }
+        }
+
+        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> Bucket
+        {
+            // Checks if the user exists
+            let user_id = self.get_user(&user_auth);
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
+                        return_borrow
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                    let empty_bucket: Bucket = self.access_vault.take(0);
+                    empty_bucket
+                }
+            }
+        }
+
+        pub fn borrow2(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> (Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
