@@ -4,8 +4,6 @@ use crate::lending_pool::*;
 
 
 // Still need to figure out how to calculate fees and interest rate
-// Rational for NFT badge is to have a tracker and dashboard of loans, deposit, collateral, and user's risk profile.
-// Advantages of having LP token as a separation to NFT badge is that it can be use for something else. 
 
 #[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
 pub struct User {
@@ -17,8 +15,6 @@ pub struct User {
     borrow_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     collateral_ratio: HashMap<ResourceAddress, Decimal>,
-    #[scrypto(mutable)]
-    loans: HashMap<ResourceAddress, Loan>,
 }
 
 blueprint! {

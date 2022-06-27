@@ -16,7 +16,6 @@ pub struct AccessBadge {
     pub description: String,
 }
 
-
 // I took the Auto-Lend blueprint example from official Scrypto examples and added a transient token to explore concepts around "folded leverage"
 // This would allow user to:
 // 1. Deposit collateral to borrow
@@ -38,13 +37,19 @@ pub struct AccessBadge {
 // * Interest dynamic adjustment strategy
 // * Upgradability
 
+// Design features:
+// * Transient tokens are used to make sure no one can just access the User Management component
+// * Only way to change NFT data is by calling methods from the pool that would give cause to 
+// to changing the NFT data i.e depositing, borrowing, etc.
+// * Pool methods will create a transient token and calls a protected method from the User Management compononet
+// to register the resource address of the transient token
+// * User Management component is now aware that a transient token from the Pool has been created
+// * The transient token passed to the User Management component has to be the same one created from the Pool(s).
+
 // TO-DO:
 // * Build a design for flash-loan
+// * How to check collateral
 // * See why vault can't be empty
-// * Naming/identifying each pool
-// * Add LP token calculation between converting deposits to collateral
-// * There is some complications when you convert deposit to collateral as it relates to LP tokens
-// * Delineate between user management and the loan nfts
 
 blueprint! {
     struct FoldedLeverage {
@@ -154,10 +159,10 @@ blueprint! {
             );
         }
 
-        /// Need to update user balance 06/01/2022
-        /// Not sure how to update deposit balance of the account given the transient token mechanic.
-        /// Updated so the balance will update, but have to think about the design further whether it makes sense 06/02/22
-        pub fn new_lending_pool(&mut self, user_auth: Proof, token_address: ResourceAddress, deposit: Bucket) -> Bucket {
+        // Need to update user balance 06/01/2022
+        // Not sure how to update deposit balance of the account given the transient token mechanic.
+        // Updated so the balance will update, but have to think about the design further whether it makes sense 06/02/22
+        pub fn new_lending_pool(&mut self, user_auth: Proof, token_address: ResourceAddress, deposit: Bucket) {
 
             let user_management = self.user_management_address.into();
 
@@ -176,7 +181,7 @@ blueprint! {
             // Sends an access badge to the lending pool
             let access_badge_token = self.access_vault.authorize(|| borrow_resource_manager!(self.access_badge_token_address).mint(Decimal::one()));
             
-            let (lending_pool, transient_token, lp_tokens): (ComponentAddress, Bucket, Bucket) = LendingPool::new(user_management, deposit, access_badge_token);
+            let (lending_pool, transient_token): (ComponentAddress, Bucket) = LendingPool::new(user_management, deposit, access_badge_token);
 
             let user_management: UserManagement = self.user_management_address.into();
             // FoldedLeverage component registers the transient token is this bad? 06/02/22
@@ -190,8 +195,6 @@ blueprint! {
                 address,
                 lending_pool.into()
             );
-
-            return lp_tokens
 
         }
 
@@ -236,7 +239,7 @@ blueprint! {
 
         }
 
-        pub fn deposit_supply(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket) -> Bucket  
+        pub fn deposit_supply(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket)  
         {
             let address: ResourceAddress = amount.resource_address(); 
             // Checks if the user exists
@@ -250,8 +253,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", address);
-                        let lp_tokens: Bucket = lending_pool.deposit(user_id, token_address, amount);
-                        lp_tokens
+                        lending_pool.deposit(user_id, token_address, amount);
                     }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
                     // In here we are creating a new liquidity pool for this token pair since we failed to find an 
@@ -337,7 +339,7 @@ blueprint! {
             }
         }
 
-        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> Bucket
+        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> Bucket
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -347,7 +349,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount, fees);
+                        let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
                         return_borrow
                     }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
@@ -362,7 +364,7 @@ blueprint! {
             }
         }
 
-        pub fn borrow2(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> (Bucket, Bucket)
+        pub fn borrow2(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> (Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -372,7 +374,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount, fees);
+                        let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
                         let transient_token = self.flash_loan_auth_vault.authorize(|| {
                             borrow_resource_manager!(self.flash_loan_resource_address).mint_non_fungible(
                                 &NonFungibleId::random(),
@@ -398,7 +400,7 @@ blueprint! {
             }
         }
 
-        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Proof, fees: Bucket) -> Bucket
+        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Proof) -> Bucket
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -411,7 +413,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                    let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount, fees);
+                    let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount);
                     // Updates the flash loan token
                     let borrow_count = 1;
                     self.update_transient_token(&flash_loan, &amount, &borrow_count);
@@ -459,7 +461,7 @@ blueprint! {
         }
 
         // Works but doesn't check lien and doesnt reduce your balance
-        pub fn redeem(&mut self, user_auth: Proof, token_reuqested: ResourceAddress, amount: Decimal, lp_tokens: Bucket) -> Bucket {
+        pub fn redeem(&mut self, user_auth: Proof, token_reuqested: ResourceAddress, amount: Decimal) -> Bucket {
 
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -470,7 +472,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_reuqested);       
-                        let return_bucket: Bucket = lending_pool.redeem(user_id, token_reuqested, amount, lp_tokens);
+                        let return_bucket: Bucket = lending_pool.redeem(user_id, token_reuqested, amount);
                         return_bucket
                     }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair

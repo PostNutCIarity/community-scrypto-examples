@@ -12,22 +12,7 @@ pub struct User {
     borrow_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     collateral_ratio: HashMap<ResourceAddress, Decimal>,
-    #[scrypto(mutable)]
-    loans: BTreeSet<NonFungibleId>,
 }
-
-#[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
-pub struct Loan {
-    asset: ResourceAddress,
-    collateral: ResourceAddress,
-    owner: NonFungibleId,
-    #[scrypto(mutable)]
-    loan_amount: Decimal,
-    collateral_amount: Decimal,
-    collateral_ratio: Decimal,
-    loan_status: Status,
-}
-
 
 // Users who know their NFT ID has access to this component to view their data.
 // Users can not change their data. Only interacting through the pools can.
@@ -99,7 +84,6 @@ blueprint! {
                         deposit_balance: HashMap::new(),
                         collateral_balance: HashMap::new(),
                         collateral_ratio: HashMap::new(),
-                        loans: BTreeSet::new(),
                     },
                 )
             });
@@ -316,16 +300,6 @@ blueprint! {
                 self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
                 return Decimal::zero()
             };
-        }
-
-        pub fn insert_loan(&mut self, user_id: NonFungibleId, loan_id: NonFungibleId) {
-            let resource_manager = borrow_resource_manager!(self.nft_address);
-            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-            if nft_data.loans.contains(&loan_id) {
-                info!("Loan has already been recorded.")
-            } else {
-                nft_data.loans.insert(loan_id);
-            }
         }
 
         fn add_collateral_ratio(&mut self, user_id: &NonFungibleId, address: ResourceAddress) {

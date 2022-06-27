@@ -16,28 +16,6 @@ pub struct AccessBadge {
     pub description: String,
 }
 
-
-// I took the Auto-Lend blueprint example from official Scrypto examples and added a transient token to explore concepts around "folded leverage"
-// This would allow user to:
-// 1. Deposit collateral to borrow
-// 2. Borrow monies
-// 3. Deposit borrowed monies
-// 4. Borrow additional monies with added borrowed collateral
-// 5. Repeat until desired leverage
-// 6. Repay loans
-
-// Currently, it's kinda basic and this is a working prototype. But I want to explore additional use-case with this concept.
-
-// This is a barebone implementation of Lending protocol.
-//
-// Following features are missing:
-// * Fees
-// * Multi-collateral with price oracle
-// * Variable interest rate
-// * Authorization
-// * Interest dynamic adjustment strategy
-// * Upgradability
-
 // TO-DO:
 // * Build a design for flash-loan
 // * See why vault can't be empty

@@ -9,8 +9,8 @@ pub enum Status {
     Current,
 }
 
-/// Still need to figure out how to calculate fees and interest rate
-/// Should NFTs be given for individual balances instead of having all balances in one NFT?
+// Still need to figure out how to calculate fees and interest rate
+// Should NFTs be given for individual balances instead of having all balances in one NFT?
 #[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
 pub struct User {
     #[scrypto(mutable)]
@@ -20,7 +20,7 @@ pub struct User {
     #[scrypto(mutable)]
     borrow_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
-    /// Trying to figure out how to auto-update this 06/10/22
+    // Trying to figure out how to auto-update this 06/10/22
     collateral_ratio: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     loans: BTreeSet<NonFungibleId>,

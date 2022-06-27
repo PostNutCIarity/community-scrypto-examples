@@ -1,0 +1,13 @@
+resim call-function $package FoldedLeverage new
+resim call-method $comp new_user
+resim call-method $comp new_lending_pool "1,$proof" "$xrd" "1000,$xrd"
+resim call-method $comp new_collateral_pool "1,$proof" "$xrd" "1000,$xrd"
+resim call-method $comp deposit_supply "1,$proof" "$xrd" "1000,$xrd"
+resim call-method $collateral check_total_supplied $xrd
+resim call-method $lending check_total_supplied $xrd
+resim call-method $comp create_transient_token --manifest ./transactions/create_token.rtm
+resim call-method $comp borrow "1,$proof" "$xrd" 1000
+resim call-method $comp flash_borrow "1,$proof" "$xrd" 1000 "1,$flash" --manifest ./transactions/flash_borrow1.rtm
+resim call-method $comp flash_repay "1,$proof" "$xrd" "1000,$xrd" "1,$flash" --manifest ./transactions/flash_repay1.rtm
+
+d537360ceedac7bf30a14d7db3688e99
