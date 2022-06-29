@@ -21,7 +21,7 @@ pub struct Loan {
 }
 
 // TO-DO:
-// * Figure out permissions for this component
+// * Figure out access controls for this component
 
 blueprint! {
     struct Liquidation {

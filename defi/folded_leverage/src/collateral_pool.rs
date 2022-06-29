@@ -16,9 +16,21 @@ pub struct User {
     #[scrypto(mutable)]
     borrow_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
-    collateral_ratio: HashMap<ResourceAddress, Decimal>,
+    loans: BTreeSet<NonFungibleId>,
+    defaults: u64,
+    paid_off: u64,
+}
+
+#[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
+pub struct Loan {
+    asset: ResourceAddress,
+    collateral: ResourceAddress,
+    owner: NonFungibleId,
     #[scrypto(mutable)]
-    loans: HashMap<ResourceAddress, Loan>,
+    loan_amount: Decimal,
+    collateral_amount: Decimal,
+    collateral_ratio: Decimal,
+    loan_status: Status,
 }
 
 blueprint! {
@@ -119,6 +131,14 @@ blueprint! {
             return (collateral_pool, transient_token_bucket);
         }
 
+        /// I want this method to be able to query the User NFT data to find the loan that has the same collateral....
+        fn user_belongs_to_pool(&self, user_id: &NonFungibleId) { 
+            let user_management: UserManagement = self.user_management_address.into();
+            let nft_resource = user_management.get_nft();
+            let resource_manager = borrow_resource_manager!(nft_resource);
+            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+        }
+
         pub fn set_address(&mut self, lending_pool_address: ComponentAddress) {
             self.lending_pool.get_or_insert(lending_pool_address);
         }
@@ -140,6 +160,34 @@ blueprint! {
             // Deposits collateral into the vault
             self.collateral_vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
         }
+
+        pub fn deposit_additional(&mut self, user_id: NonFungibleId, loan_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Bucket) {
+            assert_eq!(token_address, deposit_amount.resource_address(), "Tokens must be the same.");
+            
+            let user_management: UserManagement = self.user_management_address.into();
+            
+            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+
+            // Finds the loan NFT
+            let loan_nft_resource = lending_pool.loan_nft();
+            let resource_manager = borrow_resource_manager!(loan_nft_resource);
+            let mut loan_nft_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
+
+            let dec_deposit_amount = deposit_amount.amount();
+
+            let transient_token = self.transient_vault.authorize(|| {
+                borrow_resource_manager!(self.transient_token).mint(dec_deposit_amount)});
+
+            self.access_vault.authorize(|| {user_management.register_resource(transient_token.resource_address())});
+
+            // Updates the states
+            user_management.add_collateral_balance(user_id, token_address, dec_deposit_amount, transient_token);
+            loan_nft_data.collateral_amount += dec_deposit_amount;
+            
+            // Deposits collateral into the vault
+            self.collateral_vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
+        }
+
 
         pub fn convert_from_deposit(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, collateral_amount: Bucket) {
             assert_eq!(token_address, collateral_amount.resource_address(), "Tokens must be the same.");
