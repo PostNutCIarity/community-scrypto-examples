@@ -1,5 +1,5 @@
 use scrypto::prelude::*;
-use crate::user_management::*;
+
 use crate::lending_pool::*;
 use crate::collateral_pool::*;
 
@@ -13,11 +13,13 @@ pub struct ClaimBadge {
 pub struct Loan {
     asset: ResourceAddress,
     collateral: ResourceAddress,
+    principal_loan_amount: Decimal,
     owner: NonFungibleId,
     #[scrypto(mutable)]
-    loan_amount: Decimal,
+    remaining_balance: Decimal,
     collateral_amount: Decimal,
     collateral_ratio: Decimal,
+    loan_status: Status,
 }
 
 // TO-DO:
@@ -96,8 +98,6 @@ blueprint! {
             self.liquidation_auth.authorize(|| liquidation);
             
             // Take Loan NFT and burn
-            let bad_loan = lending_pool.transfer_bad_loan(loan_id);
-            bad_loan.burn();
 
             // Update User State
 

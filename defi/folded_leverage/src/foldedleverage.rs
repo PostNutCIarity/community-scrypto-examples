@@ -20,9 +20,8 @@ pub struct AccessBadge {
 // * Build a design for flash-loan
 // * See why vault can't be empty
 // * Naming/identifying each pool
-// * Add LP token calculation between converting deposits to collateral
-// * There is some complications when you convert deposit to collateral as it relates to LP tokens
 // * Delineate between user management and the loan nfts
+// * Interest rates
 
 blueprint! {
     struct FoldedLeverage {
@@ -194,7 +193,7 @@ blueprint! {
             // Is FoldedLeverage component even allowed to register resource?
             let transient_token_address = transient_token.resource_address();
             self.access_badge_token_vault.authorize(|| {user_management.register_resource(transient_token_address)});
-            user_management.add_deposit_balance(user_id, token_address, deposit_amount, transient_token);
+            user_management.add_collateral_balance(user_id, token_address, deposit_amount, transient_token);
 
             // Inserts into lending pool hashmap
             self.collateral_pools.insert(
@@ -334,7 +333,7 @@ blueprint! {
             }
         }
 
-        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> Bucket
+        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> (Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -344,43 +343,8 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount, fees);
-                        return_borrow
-                    }
-                None => { // If this matches then there does not exist a liquidity pool for this token pair
-                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
-                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
-                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
-                    // method to be general and allow for the possibility of the liquidity pool not being there.
-                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
-                    let empty_bucket: Bucket = self.access_vault.take(0);
-                    empty_bucket
-                }
-            }
-        }
-
-        pub fn borrow2(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> (Bucket, Bucket)
-        {
-            // Checks if the user exists
-            let user_id = self.get_user(&user_auth);
-
-            // Attempting to get the lending pool component associated with the provided address pair.
-            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
-            match optional_lending_pool {
-                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
-                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount, fees);
-                        let transient_token = self.flash_loan_auth_vault.authorize(|| {
-                            borrow_resource_manager!(self.flash_loan_resource_address).mint_non_fungible(
-                                &NonFungibleId::random(),
-                                FlashLoan {
-                                    amount_due: amount,
-                                    borrow_count: 1,
-                                },
-                            )
-                        });
-                        
-                        (return_borrow, transient_token)
+                        let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount, fees);
+                        (return_borrow, loan_nft)
                     }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
                     // In here we are creating a new liquidity pool for this token pair since we failed to find an 
@@ -395,7 +359,44 @@ blueprint! {
             }
         }
 
-        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Proof, fees: Bucket) -> Bucket
+        pub fn borrow2(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> (Bucket, Bucket, Bucket)
+        {
+            // Checks if the user exists
+            let user_id = self.get_user(&user_auth);
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount, fees);
+                        let transient_token = self.flash_loan_auth_vault.authorize(|| {
+                            borrow_resource_manager!(self.flash_loan_resource_address).mint_non_fungible(
+                                &NonFungibleId::random(),
+                                FlashLoan {
+                                    amount_due: amount,
+                                    borrow_count: 1,
+                                },
+                            )
+                        });
+                        
+                        (return_borrow, transient_token, loan_nft)
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                    let empty_bucket1: Bucket = self.access_vault.take(0);
+                    let empty_bucket2: Bucket = self.access_vault.take(0);
+                    let empty_bucket3: Bucket = self.access_vault.take(0);
+                    (empty_bucket1, empty_bucket2, empty_bucket3)
+                }
+            }
+        }
+
+        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Proof, fees: Bucket) -> (Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -408,11 +409,11 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                    let return_borrow: Bucket = lending_pool.borrow(user_id, token_requested, amount, fees);
+                    let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount, fees);
                     // Updates the flash loan token
                     let borrow_count = 1;
                     self.update_transient_token(&flash_loan, &amount, &borrow_count);
-                    return_borrow
+                    (return_borrow, loan_nft)
                 }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
                     // In here we are creating a new liquidity pool for this token pair since we failed to find an 
@@ -420,9 +421,10 @@ blueprint! {
                     // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
                     // method to be general and allow for the possibility of the liquidity pool not being there.
                     info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
-                    let empty_bucket: Bucket = self.access_vault.take(Decimal::zero());
+                    let empty_bucket1: Bucket = self.access_vault.take(Decimal::zero());
+                    let empty_bucket2: Bucket = self.access_vault.take(Decimal::zero());
                     // How to make sure that no changes were made on the flash loan token?
-                    empty_bucket
+                    (empty_bucket1, empty_bucket2)
                 }
             }
         }
@@ -482,7 +484,7 @@ blueprint! {
             }
         }
 
-        pub fn repay(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Bucket) -> Bucket {
+        pub fn repay(&mut self, user_auth: Proof, loan_id: NonFungibleId, token_requested: ResourceAddress, amount: Bucket) -> Bucket {
 
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -495,7 +497,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let return_bucket: Bucket = lending_pool.repay(user_id, token_requested, amount);
+                        let return_bucket: Bucket = lending_pool.repay(user_id, loan_id, token_requested, amount);
                         return_bucket
                     }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
@@ -511,7 +513,7 @@ blueprint! {
         }
 
         // Think about design of flash repay
-        pub fn flash_repay(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Bucket, flash_loan: Bucket) -> Bucket {
+        pub fn flash_repay(&mut self, user_auth: Proof, loan_id: NonFungibleId, token_requested: ResourceAddress, amount: Bucket, flash_loan: Bucket) -> Bucket {
 
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -530,7 +532,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let return_bucket: Bucket = lending_pool.repay(user_id, token_requested, amount);
+                        let return_bucket: Bucket = lending_pool.repay(user_id, loan_id, token_requested, amount);
                         self.flash_loan_auth_vault.authorize(|| flash_loan.burn());
                         return_bucket
                     }

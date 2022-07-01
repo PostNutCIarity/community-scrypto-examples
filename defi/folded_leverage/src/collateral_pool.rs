@@ -25,9 +25,10 @@ pub struct User {
 pub struct Loan {
     asset: ResourceAddress,
     collateral: ResourceAddress,
+    principal_loan_amount: Decimal,
     owner: NonFungibleId,
     #[scrypto(mutable)]
-    loan_amount: Decimal,
+    remaining_balance: Decimal,
     collateral_amount: Decimal,
     collateral_ratio: Decimal,
     loan_status: Status,
@@ -183,7 +184,7 @@ blueprint! {
             // Updates the states
             user_management.add_collateral_balance(user_id, token_address, dec_deposit_amount, transient_token);
             loan_nft_data.collateral_amount += dec_deposit_amount;
-            
+
             // Deposits collateral into the vault
             self.collateral_vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
         }

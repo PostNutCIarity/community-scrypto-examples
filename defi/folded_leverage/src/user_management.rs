@@ -13,6 +13,7 @@ pub struct User {
     #[scrypto(mutable)]
     deposit_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
+    // Should we have collateral_balance: HashMap<(ResourceAddress, NonFungibleID), Decimal> instead?
     collateral_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     borrow_balance: HashMap<ResourceAddress, Decimal>,
@@ -32,22 +33,23 @@ pub struct User {
 pub struct Loan {
     asset: ResourceAddress,
     collateral: ResourceAddress,
+    principal_loan_amount: Decimal,
     owner: NonFungibleId,
     #[scrypto(mutable)]
-    loan_amount: Decimal,
+    remaining_balance: Decimal,
     collateral_amount: Decimal,
     collateral_ratio: Decimal,
     loan_status: Status,
 }
 
 blueprint! {
-    /// Users who know their NFT ID has access to this component to view their data.
-    /// Users can not change their data. Only interacting through the pools can.
-    /// Changing deposit, borrow, and colalteral balance data can only be triggered through interacting with the pool.
-    /// The Pool mints a transient token that will be sent to the User Management component.
-    /// The User Management component has a protected method through which the pool can call to register the resource address
-    /// Of the transient token. The transient token that is passed to the method call in the User Management component
-    /// is then checked to ensure that the transient token was indeed minted from the pool.
+/// Users who know their NFT ID has access to this component to view their data.
+/// Users can not change their data. Only interacting through the pools can.
+/// Changing deposit, borrow, and colalteral balance data can only be triggered through interacting with the pool.
+/// The Pool mints a transient token that will be sent to the User Management component.
+/// The User Management component has a protected method through which the pool can call to register the resource address
+/// Of the transient token. The transient token that is passed to the method call in the User Management component
+/// is then checked to ensure that the transient token was indeed minted from the pool.
     struct UserManagement {
         /// Vault that holds the authorization badge
         user_badge_vault: Vault,
@@ -86,6 +88,7 @@ blueprint! {
                 .metadata("user", "Lending Protocol User")
                 .mintable(rule!(require(lending_protocol_user_badge.resource_address())), LOCKED)
                 .burnable(rule!(require(lending_protocol_user_badge.resource_address())), LOCKED)
+                .restrict_withdraw(rule!(deny_all), LOCKED)
                 .updateable_non_fungible_data(rule!(require(lending_protocol_user_badge.resource_address())), LOCKED)
                 .no_initial_supply();
             
@@ -206,7 +209,7 @@ blueprint! {
         }
 
         /// Check and understand the logic here - 06/01/2022
-        pub fn decrease_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal, transient_token: Bucket) -> Decimal {
+        pub fn decrease_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal, transient_token: Bucket) {
 
             // Checks to see whether the transient token passed came from the lending pool
             assert!(
@@ -231,22 +234,13 @@ blueprint! {
             // Retrieves resource manager to find user 
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+            assert!(nft_data.deposit_balance.contains_key(&address), "Must have this deposit resource to withdraw");
+            *nft_data.deposit_balance.get_mut(&address).unwrap() -= redeem_amount;
 
-            // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
-            let mut borrow_balance = *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
+            assert!(nft_data.deposit_balance.get_mut(&address).unwrap() >= &mut Decimal::zero(), "Deposit balance cannot be negative.");
 
-            if borrow_balance < redeem_amount {
-                let to_return = redeem_amount - borrow_balance;
-                let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-                *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) -= redeem_amount;
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
-                return to_return
-            }
-            else {
-                borrow_balance -= redeem_amount;
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
-                return Decimal::zero()
-            };
+            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+
         }
         
         pub fn deposit_resource_exists(&self, user_auth: Proof, address: ResourceAddress) -> bool {
