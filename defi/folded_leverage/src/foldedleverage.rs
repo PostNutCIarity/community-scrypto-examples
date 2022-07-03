@@ -49,14 +49,13 @@ blueprint! {
                 .metadata("name", "Access Badge")
                 .initial_supply(1);   
                 
-            let mut access_badge_token = ResourceBuilder::new_fungible()
+            let access_badge_token = ResourceBuilder::new_fungible()
                 .metadata("name", "Access Badge")
                 .mintable(rule!(require(access_badge.resource_address())), LOCKED)
                 .burnable(rule!(require(access_badge.resource_address())), LOCKED)
-                .initial_supply(2);
+                .initial_supply(1);
 
             let access_badge_token_address = access_badge_token.resource_address();
-            let access_badge_token_user: Bucket = access_badge_token.take(1);
 
             // Creates badge to authorizie to mint/burn flash loan
             let flash_loan_token = ResourceBuilder::new_fungible()
@@ -84,7 +83,7 @@ blueprint! {
                 collateral_pool_address: HashMap::new(),
                 flash_loan_auth_vault: Vault::with_bucket(flash_loan_token),
                 flash_loan_resource_address: flash_loan_resource_address,
-                user_management_address: UserManagement::new(access_badge_token.resource_address(), access_badge_token_user),
+                user_management_address: UserManagement::new(access_badge_token.resource_address()),
                 access_vault: Vault::with_bucket(access_badge),
                 access_badge_token_vault: Vault::with_bucket(access_badge_token),
                 access_badge_token_address: access_badge_token_address,
@@ -151,15 +150,12 @@ blueprint! {
             // Sends an access badge to the lending pool
             let access_badge_token = self.access_vault.authorize(|| borrow_resource_manager!(self.access_badge_token_address).mint(Decimal::one()));
             
-            let (lending_pool, transient_token): (ComponentAddress, Bucket) = LendingPool::new(user_management, deposit, access_badge_token);
+            let lending_pool: ComponentAddress = LendingPool::new(user_management, deposit, access_badge_token);
 
             let user_management: UserManagement = self.user_management_address.into();
             // FoldedLeverage component registers the transient token is this bad? 06/02/22
             // Is FoldedLeverage component even allowed to register resource?
-            let transient_token_address = transient_token.resource_address();
-            self.access_badge_token_vault.authorize(|| {user_management.register_resource(transient_token_address)});
-            user_management.add_deposit_balance(user_id, token_address, deposit_amount, transient_token);
-
+            self.access_badge_token_vault.authorize(|| {user_management.add_deposit_balance(user_id, token_address, deposit_amount);});
             // Inserts into lending pool hashmap
             self.lending_pools.insert(
                 address,
@@ -186,14 +182,12 @@ blueprint! {
             // Sends an access badge to the collateral pool
             let access_badge_token = self.access_vault.authorize(|| borrow_resource_manager!(self.access_badge_token_address).mint(Decimal::one()));
 
-            let (collateral_pool, transient_token): (ComponentAddress, Bucket) = CollateralPool::new(user_management, collateral, access_badge_token);
+            let collateral_pool: ComponentAddress = CollateralPool::new(user_management, collateral, access_badge_token);
 
             let user_management: UserManagement = self.user_management_address.into();
             // FoldedLeverage component registers the transient token is this bad? 06/02/22
             // Is FoldedLeverage component even allowed to register resource?
-            let transient_token_address = transient_token.resource_address();
-            self.access_badge_token_vault.authorize(|| {user_management.register_resource(transient_token_address)});
-            user_management.add_collateral_balance(user_id, token_address, deposit_amount, transient_token);
+            user_management.add_collateral_balance(user_id, token_address, deposit_amount);
 
             // Inserts into lending pool hashmap
             self.collateral_pools.insert(
@@ -333,7 +327,7 @@ blueprint! {
             }
         }
 
-        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> (Bucket, Bucket)
+        pub fn borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> (Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -343,7 +337,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount, fees);
+                        let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount);
                         (return_borrow, loan_nft)
                     }
                 None => { // If this matches then there does not exist a liquidity pool for this token pair
@@ -359,7 +353,7 @@ blueprint! {
             }
         }
 
-        pub fn borrow2(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, fees: Bucket) -> (Bucket, Bucket, Bucket)
+        pub fn borrow2(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal) -> (Bucket, Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -369,7 +363,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                        let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount, fees);
+                        let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount);
                         let transient_token = self.flash_loan_auth_vault.authorize(|| {
                             borrow_resource_manager!(self.flash_loan_resource_address).mint_non_fungible(
                                 &NonFungibleId::random(),
@@ -396,7 +390,7 @@ blueprint! {
             }
         }
 
-        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Proof, fees: Bucket) -> (Bucket, Bucket)
+        pub fn flash_borrow(&mut self, user_auth: Proof, token_requested: ResourceAddress, amount: Decimal, flash_loan: Proof) -> (Bucket, Bucket)
         {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
@@ -409,7 +403,7 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
                     info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
-                    let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount, fees);
+                    let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, amount);
                     // Updates the flash loan token
                     let borrow_count = 1;
                     self.update_transient_token(&flash_loan, &amount, &borrow_count);

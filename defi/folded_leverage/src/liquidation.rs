@@ -9,16 +9,23 @@ pub struct ClaimBadge {
     pub claim_amount: Decimal,
 }
 
+
 #[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
 pub struct Loan {
     asset: ResourceAddress,
     collateral: ResourceAddress,
     principal_loan_amount: Decimal,
+    interest: Decimal,
     owner: NonFungibleId,
     #[scrypto(mutable)]
     remaining_balance: Decimal,
+    #[scrypto(mutable)]
+    interest_expense: Decimal,
+    #[scrypto(mutable)]
     collateral_amount: Decimal,
+    #[scrypto(mutable)]
     collateral_ratio: Decimal,
+    #[scrypto(mutable)]
     loan_status: Status,
 }
 
@@ -72,11 +79,6 @@ blueprint! {
             self.lending_pool.get_or_insert(pool_address);
         }        
 
-        // Think whether you need authorization here
-        pub fn view_bad_loans(&self) -> String {
-            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
-            return lending_pool.get_bad_loans();
-        }
 
         // When you take someone's loan make sure they can't just take a random loan NFT.
         // Ways to do this is check the NFT data

@@ -13,13 +13,14 @@ pub struct User {
     #[scrypto(mutable)]
     deposit_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
-    // Should we have collateral_balance: HashMap<(ResourceAddress, NonFungibleID), Decimal> instead?
     collateral_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     borrow_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     loans: BTreeSet<NonFungibleId>,
+    #[scrypto(mutable)]
     defaults: u64,
+    #[scrypto(mutable)]
     paid_off: u64,
 }
 
@@ -34,11 +35,17 @@ pub struct Loan {
     asset: ResourceAddress,
     collateral: ResourceAddress,
     principal_loan_amount: Decimal,
+    interest: Decimal,
     owner: NonFungibleId,
     #[scrypto(mutable)]
     remaining_balance: Decimal,
+    #[scrypto(mutable)]
+    interest_expense: Decimal,
+    #[scrypto(mutable)]
     collateral_amount: Decimal,
+    #[scrypto(mutable)]
     collateral_ratio: Decimal,
+    #[scrypto(mutable)]
     loan_status: Status,
 }
 
@@ -61,9 +68,6 @@ blueprint! {
         /// It is used to verify that the transient token that is sent to the user management component belongs to
         /// the pools of this protocol.
         allowed_resource: Vec<ResourceAddress>,
-        /// The access vadge that is contained in this vault is used as a mechanism to allow the transient token to be
-        /// burnt.
-        access_vault: Vault,
     }
 
     /// Instantiates the User Management component. This is instantiated through the main router component. 
@@ -73,9 +77,9 @@ blueprint! {
     /// that are minted as a result of interacting with the pool (i.e to borrow). This is required to ensure there 
     /// are proper access controls to updating the User NFT. 
     impl UserManagement {
-        pub fn new(allowed: ResourceAddress, access: Bucket) -> ComponentAddress {
+        pub fn new(allowed: ResourceAddress) -> ComponentAddress {
 
-            let access_rules: AccessRules = AccessRules::new().method("register_resource", rule!(require(allowed))).default(rule!(allow_all));
+            let access_rules: AccessRules = AccessRules::new().default(rule!(require(allowed))).default(rule!(allow_all));
 
             // Badge that will be stored in the component's vault to provide authorization to update the User NFT.
             let lending_protocol_user_badge = ResourceBuilder::new_fungible()
@@ -97,7 +101,6 @@ blueprint! {
                 nft_address: nft_address,
                 user_record: HashMap::new(),
                 allowed_resource: Vec::from([allowed]),
-                access_vault: Vault::with_bucket(access),
             }
             .instantiate()
             .add_access_check(access_rules)
@@ -176,16 +179,7 @@ blueprint! {
         /// The transient resource address is then registered to this component where add_deposit_balance checks whether the transient resource token that has been passed
         /// Is the same as the transient resource that was created in the lending pool component
         /// The NFT data is then updated and the transient resource is burnt.
-        pub fn add_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
-
-            // Checks to see whether the transient token passed came from the lending pool.
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
-
-            // Verify transient token is provided the same amount as the deposit.
-            assert_eq!(amount, transient_token.amount(), "Incorrect amount.");
+        pub fn add_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
 
             // Asserts user exists
             self.assert_user_exist(&user_id);
@@ -200,22 +194,13 @@ blueprint! {
             else {
                 nft_data.deposit_balance.insert(address, amount);
             };
-
-            // Burns the transient token
-            self.access_vault.authorize(|| transient_token.burn());
             
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
         }
 
         /// Check and understand the logic here - 06/01/2022
-        pub fn decrease_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal, transient_token: Bucket) {
-
-            // Checks to see whether the transient token passed came from the lending pool
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
+        pub fn decrease_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal) {
 
             // Asserts user exists
             self.assert_user_exist(&user_id);
@@ -225,11 +210,6 @@ blueprint! {
 
             // Asserts that the user must have an existing borrow balance of the resource.
             self.assert_deposit_resource_exists(&user_id, &address);
-
-            // Verify transient token is provided the same amount as the deposit
-            assert_eq!(redeem_amount, transient_token.amount(), "Incorrect amount.");
-
-            self.access_vault.authorize(|| transient_token.burn());
 
             // Retrieves resource manager to find user 
             let resource_manager = borrow_resource_manager!(self.nft_address);
@@ -284,16 +264,7 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `None` - The method simply updates the User NFT
-        pub fn add_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
-
-            // Checks to see whether the transient token passed came from the lending pool
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
-
-            // Verify transient token is provided the same amount as the deposit
-            assert_eq!(amount, transient_token.amount(), "Incorrect amount.");
+        pub fn add_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
 
             // Asserts user exists
             self.assert_user_exist(&user_id);
@@ -307,8 +278,6 @@ blueprint! {
             } else {
                 nft_data.borrow_balance.insert(address, amount);
             };
-            
-            self.access_vault.authorize(|| transient_token.burn());
 
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
@@ -345,23 +314,13 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `Decimal` - The number of which is sent to the pool to show how much is owed to the borrower if the borrower overpaid to close out the loan.
-        pub fn decrease_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, repay_amount: Decimal, transient_token: Bucket) -> Decimal {
-
-            // Checks to see whether the transient token passed came from the lending pool
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
+        pub fn decrease_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, repay_amount: Decimal, ) -> Decimal {
 
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
             // Asserts that the user must have an existing borrow balance of the resource.
             self.assert_borrow_resource_exists(&user_id, &address);
-
-            // Verify transient token is provided the same amount as the deposit
-            assert_eq!(repay_amount, transient_token.amount(), "Incorrect amount.");
-            self.access_vault.authorize(|| transient_token.burn());
 
             // Retrieves resource manager to find user 
             let resource_manager = borrow_resource_manager!(self.nft_address);
@@ -382,6 +341,19 @@ blueprint! {
                 self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
                 return Decimal::zero()
             };
+        }
+
+        pub fn inc_paid_off(&mut self, user_id: NonFungibleId) {
+
+            // Asserts user exists
+            self.assert_user_exist(&user_id);
+
+            // Retrieves resource manager to find user 
+            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+            nft_data.paid_off += 1;
+
+            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
         }
 
         /// This inserts the NonFungibleId of the loan to the Usert NFT.
@@ -422,7 +394,10 @@ blueprint! {
             } else {
                 nft_data.loans.insert(loan_id);
             }
+
+            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
         }
+        
 
         pub fn check_borrow_balance(&self, user_auth: Proof) { // This way or check_deposit_balance?
             let user_badge_data: User = user_auth.non_fungible().data();
@@ -437,18 +412,7 @@ blueprint! {
             return assert!(nft_data.borrow_balance.contains_key(&address), "This token resource does not exist in your borrow balance.")
         }
 
-        pub fn convert_deposit_to_collateral(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
-
-            // Checks to see whether the transient token passed came from the lending pool
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
-
-            // Verify transient token is provided the same amount as the deposit
-            assert_eq!(
-                amount, transient_token.amount(),
-                "Incorrect amount.");
+        pub fn convert_deposit_to_collateral(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
 
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             // Converts the deposit to collateral balance by subtracting from deposit and adding to collateral balance.
@@ -462,25 +426,12 @@ blueprint! {
                 *nft_data.deposit_balance.get_mut(&address).unwrap() -= amount;
                 nft_data.collateral_balance.insert(address, amount);
             };
-
-            self.access_vault.authorize(|| transient_token.burn());
-            
-            
+             
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
         }
 
-        pub fn convert_collateral_to_deposit(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
-
-            // Checks to see whether the transient token passed came from the lending pool
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
-
-            // Verify transient token is provided the same amount as the deposit
-            assert_eq!(amount, transient_token.amount(), "Incorrect amount.");
-
+        pub fn convert_collateral_to_deposit(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
 
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             // Converts the deposit to collateral balance by subtracting from deposit and adding to collateral balance.
@@ -495,24 +446,12 @@ blueprint! {
                 *nft_data.collateral_balance.get_mut(&address).unwrap() -= amount;
                 nft_data.deposit_balance.insert(address, amount);
             };
-
-            self.access_vault.authorize(|| transient_token.burn());
             
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
         }
 
-        pub fn add_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal, transient_token: Bucket) {
-
-            // Checks to see whether the transient token passed came from the lending pool
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
-
-            // Verify transient token is provided the same amount as the deposit
-            assert_eq!(amount, transient_token.amount(), "Incorrect amount.");
-
+        pub fn add_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
 
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             let resource_manager = borrow_resource_manager!(self.nft_address);
@@ -524,21 +463,12 @@ blueprint! {
             else {
                 nft_data.collateral_balance.insert(address, amount);
             };
-
-            self.access_vault.authorize(|| transient_token.burn());
-            
-            
+                     
             // Commits state
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
         }
 
-        pub fn decrease_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal, transient_token: Bucket) -> Decimal {
-
-            // Checks to see whether the transient token passed came from the lending pool
-            assert!(
-                self.allowed_resource.contains(&transient_token.resource_address()), 
-                "Incorrect resource passed in for loan terms"
-            );
+        pub fn decrease_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal) -> Decimal {
 
             // Asserts user exists
             self.assert_user_exist(&user_id);
@@ -548,11 +478,6 @@ blueprint! {
 
             // Asserts that the user must have an existing borrow balance of the resource.
             self.assert_deposit_resource_exists(&user_id, &address);
-
-            // Verify transient token is provided the same amount as the deposit
-            assert_eq!(redeem_amount, transient_token.amount(), "Incorrect amount.");
-
-            self.access_vault.authorize(|| transient_token.burn());
 
             // Retrieves resource manager to find user 
             let resource_manager = borrow_resource_manager!(self.nft_address);
