@@ -2,8 +2,8 @@ use scrypto::prelude::*;
 use crate::lending_pool::*;
 use crate::collateral_pool::*;
 use crate::user_management::*;
-use crate::user_management::User;
-
+use crate::liquidation::*;
+use crate::structs::{User};
 
 #[derive(NonFungibleData, Debug)]
 pub struct FlashLoan {
@@ -21,7 +21,6 @@ pub struct AccessBadge {
 // * See why vault can't be empty
 // * Naming/identifying each pool
 // * Delineate between user management and the loan nfts
-// * Interest rates
 
 blueprint! {
     struct FoldedLeverage {
@@ -33,6 +32,7 @@ blueprint! {
         flash_loan_resource_address: ResourceAddress,
         // Vault that holds the authorization badge
         user_management_address: ComponentAddress,
+        liquidation: ComponentAddress,
         // Access badge to allow lending pool component to call a method from user management component. Folded Leverage component does not receive one.
         access_vault: Vault,
         access_badge_token_vault: Vault,
@@ -84,6 +84,7 @@ blueprint! {
                 flash_loan_auth_vault: Vault::with_bucket(flash_loan_token),
                 flash_loan_resource_address: flash_loan_resource_address,
                 user_management_address: UserManagement::new(access_badge_token.resource_address()),
+                liquidation: Liquidation::new(),
                 access_vault: Vault::with_bucket(access_badge),
                 access_badge_token_vault: Vault::with_bucket(access_badge_token),
                 access_badge_token_address: access_badge_token_address,
@@ -94,7 +95,7 @@ blueprint! {
 
         pub fn new_user(&mut self) -> Bucket {
             let user_management: UserManagement = self.user_management_address.into();
-            let new_user: Bucket = user_management.new_user();
+            let new_user: Bucket = self.access_badge_token_vault.authorize(|| user_management.new_user());
             return new_user
         }
 
@@ -128,12 +129,72 @@ blueprint! {
             );
         }
 
+        pub fn set_price(&mut self, user_auth: Proof, address: ResourceAddress, xrd_price: Decimal) {
+            let user_id = self.get_user(&user_auth);
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&address);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", address);
+                    lending_pool.set_price(user_id, xrd_price);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", address);
+                }
+            }
+        }
+
+        pub fn set_collateral_pool_address(&mut self, address: ResourceAddress, collateral_pool_address: ComponentAddress) {
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&address);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", address);
+                    lending_pool.set_address(collateral_pool_address);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", address);
+                }
+            }
+        }
+
+        pub fn set_lending_pool_address(&mut self, address: ResourceAddress, lending_pool_address: ComponentAddress) {
+
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_collateral_pool: Option<&CollateralPool> = self.collateral_pools.get(&address);
+            match optional_collateral_pool {
+                Some (collateral_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", address);
+                    collateral_pool.set_address(lending_pool_address);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[DEX Add Liquidity]: Pool for {:?} doesn't exist. Creating a new one.", address);
+                }
+            }
+        }
+
+
         /// Need to update user balance 06/01/2022
         /// Not sure how to update deposit balance of the account given the transient token mechanic.
         /// Updated so the balance will update, but have to think about the design further whether it makes sense 06/02/22
         pub fn new_lending_pool(&mut self, user_auth: Proof, token_address: ResourceAddress, deposit: Bucket) {
 
             let user_management = self.user_management_address.into();
+
 
             // Checking if a lending pool already exists for this token
             self.assert_pool_doesnt_exists(
@@ -168,10 +229,11 @@ blueprint! {
             let user_management = self.user_management_address.into();
 
             // Checking if a lending pool already exists for this token
-            // self.assert_pool_doesnt_exists(
-                // collateral.resource_address(), 
-                // String::from("New Collateral Pool")
-            // );
+            // Cant use this yet because its based on resource address
+            //self.assert_pool_doesnt_exists(
+                //collateral.resource_address(), 
+                //String::from("New Collateral Pool")
+            //);
 
             // Checking if user exists
             let user_id = self.get_user(&user_auth);
@@ -199,6 +261,25 @@ blueprint! {
                 address,
                 collateral_pool.into()
             );
+        }
+
+        pub fn set_address(
+            &mut self,
+            address: ResourceAddress,
+            lending_pool_address: ComponentAddress,
+            collateral_pool_address: ComponentAddress,
+            user_management_address: ComponentAddress
+        ) {
+            let liquidation: Liquidation = self.liquidation.into();
+            liquidation.set_address(
+                lending_pool_address,
+                collateral_pool_address,
+                user_management_address,
+            );
+            let lending_pool: &LendingPool = self.lending_pools.get(&address).unwrap();
+            lending_pool.set_address(collateral_pool_address);
+            let collateral_pool: &CollateralPool = self.collateral_pools.get(&address).unwrap();
+            collateral_pool.set_address(lending_pool_address);
         }
 
         pub fn deposit_supply(&mut self, user_auth: Proof, token_address: ResourceAddress, amount: Bucket) {
@@ -506,6 +587,16 @@ blueprint! {
             }
         }
 
+        pub fn liquidate(&mut self, loan_id: NonFungibleId, token_requested: ResourceAddress, repay_amount: Bucket) -> Bucket {
+
+            let liquidation: Liquidation = self.liquidation.into();
+
+            let claim_amount: Bucket = liquidation.liquidate(loan_id, token_requested, repay_amount);
+
+            claim_amount
+        }
+
+
         // Think about design of flash repay
         pub fn flash_repay(&mut self, user_auth: Proof, loan_id: NonFungibleId, token_requested: ResourceAddress, amount: Bucket, flash_loan: Bucket) -> Bucket {
 
@@ -541,5 +632,101 @@ blueprint! {
                 }
             }
         }
+
+        pub fn find_bad_loans(&mut self, token_requested: ResourceAddress)
+        {
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        lending_pool.get_bad_loans();
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                }
+            }
+        }
+
+        pub fn check_liquidity(&mut self, token_requested: ResourceAddress)
+        {
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        lending_pool.check_liquidity(token_requested);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                }
+            }
+        }
+
+        pub fn check_utilization_rate(&mut self, token_requested: ResourceAddress)
+        {
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        lending_pool.check_utilization_rate(token_requested);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                }
+            }
+        }
+
+        pub fn check_total_supplied(&mut self, token_requested: ResourceAddress)
+        {
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        lending_pool.check_total_supplied(token_requested);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                }
+            }
+        }
+
+        pub fn check_total_borrowed(&mut self, token_requested: ResourceAddress)
+        {
+            // Attempting to get the lending pool component associated with the provided address pair.
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the liquidity pool exists.
+                    info!("[Lending Protocol Supply Tokens]: Pool for {:?} already exists. Adding supply directly.", token_requested);
+                        lending_pool.check_total_borrowed(token_requested);
+                    }
+                None => { // If this matches then there does not exist a liquidity pool for this token pair
+                    // In here we are creating a new liquidity pool for this token pair since we failed to find an 
+                    // already existing liquidity pool. The return statement below might seem somewhat redundant in 
+                    // terms of the two empty buckets being returned, but this is done to allow for the add liquidity
+                    // method to be general and allow for the possibility of the liquidity pool not being there.
+                    info!("[Borrow]: Pool for {:?} doesn't exist.", token_requested);
+                }
+            }
+        }
+
     }
 }

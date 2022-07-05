@@ -1,50 +1,7 @@
 use scrypto::prelude::*;
 use crate::user_management::*;
 use crate::collateral_pool::*;
-
-#[derive(TypeId, Encode, Decode, Describe, PartialEq)]
-pub enum Status {
-    PaidOff,
-    Defaulted,
-    Current,
-}
-
-#[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
-pub struct User {
-    #[scrypto(mutable)]
-    deposit_balance: HashMap<ResourceAddress, Decimal>,
-    #[scrypto(mutable)]
-    collateral_balance: HashMap<ResourceAddress, Decimal>,
-    #[scrypto(mutable)]
-    borrow_balance: HashMap<ResourceAddress, Decimal>,
-    #[scrypto(mutable)]
-    loans: BTreeSet<NonFungibleId>,
-    #[scrypto(mutable)]
-    defaults: u64,
-    #[scrypto(mutable)]
-    paid_off: u64,
-}
-
-#[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
-pub struct Loan {
-    asset: ResourceAddress,
-    collateral: ResourceAddress,
-    principal_loan_amount: Decimal,
-    interest: Decimal,
-    owner: NonFungibleId,
-    #[scrypto(mutable)]
-    remaining_balance: Decimal,
-    #[scrypto(mutable)]
-    interest_expense: Decimal,
-    #[scrypto(mutable)]
-    collateral_amount: Decimal,
-    #[scrypto(mutable)]
-    collateral_amount_usd: Decimal,
-    #[scrypto(mutable)]
-    health_factor: Decimal,
-    #[scrypto(mutable)]
-    loan_status: Status,
-}
+use crate::structs::{User, Loan, Status};
 
 blueprint! {
     /// This is a struct used to define the Lending Pool.
@@ -133,6 +90,7 @@ blueprint! {
             ); 
 
             let user_management_address: ComponentAddress = user_component_address;
+
 
             // Define the resource address of the fees collected
             let funds_resource_def = initial_funds.resource_address();
@@ -225,6 +183,10 @@ blueprint! {
 
                 self.loan_issuer_badge.authorize(|| resource_manager.update_non_fungible_data(loans, loan_data));
             }   
+        }
+
+        pub fn retrieve_xrd_price(&self) -> Decimal {
+            return self.xrd_usd;
         }
 
         /// Returns the ResourceAddress of the loan NFTs so the collateral pool component can access the NFT data.
@@ -485,6 +447,8 @@ blueprint! {
             // Minting tracking tokens to be deposited to borrowed_vault to track borrows from this pool and deposits to the pool's borrowed vault.
             self.mint_borrow(token_address, actual_borrow);
 
+            let interest_rate = self.interest_calc(token_address);
+
             // Mint loan NFT
             let loan_nft = self.loan_issuer_badge.authorize(|| {
                 let resource_manager: &ResourceManager = borrow_resource_manager!(self.loan_address);
@@ -496,7 +460,7 @@ blueprint! {
                         asset: token_address,
                         collateral: token_address,
                         principal_loan_amount: borrow_amount,
-                        interest: self.interest,
+                        interest: interest_rate,
                         owner: user_id.clone(),
                         remaining_balance: actual_borrow + interest_expense,
                         collateral_amount: collateral_amount,
@@ -742,9 +706,44 @@ blueprint! {
                 let resource_manager = borrow_resource_manager!(self.loan_address);
                 let loan_data: Loan = resource_manager.get_non_fungible_data(&loans);
                 let health_factor = loan_data.health_factor;
-                let loan_str = format!("Loan ID: {} health factor: {}", loans, health_factor);
+                let loan_str = format!("Loan ID: {}, Health Factor: {}", loans, health_factor);
                 info!("{:?}", loan_str);
             };
+        }
+
+        pub fn default_loan(&mut self, loan_id: NonFungibleId) {
+            let mut loan_data = self.call_resource_mananger(&loan_id);
+            loan_data.loan_status = Status::Defaulted;
+            self.authorize_update(&loan_id, loan_data)
+        }
+        
+        fn call_resource_mananger(&mut self, loan_id: &NonFungibleId) -> Loan {
+            let resource_manager = borrow_resource_manager!(self.loan_address);
+            let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
+            return loan_data
+        }
+
+        fn authorize_update(&mut self, loan_id: &NonFungibleId, loan_data: Loan) {
+            let resource_manager = borrow_resource_manager!(self.loan_address);
+            self.loan_issuer_badge.authorize(|| resource_manager.update_non_fungible_data(&loan_id, loan_data));
+        }
+
+        pub fn interest_calc(&mut self, token_address: ResourceAddress) -> Decimal {
+            let utilization_rate = self.check_utilization_rate(token_address);
+
+            let interest = if utilization_rate > dec!(".90") {
+                dec!("0.12")
+            } else if utilization_rate > dec!(".80") && utilization_rate <= dec!(".90") {
+                dec!("0.11")
+            } else if utilization_rate > dec!(".70") && utilization_rate <= dec!(".80") {
+                dec!("0.10")
+            } else if utilization_rate > dec!(".60") && utilization_rate <= dec!(".70") {
+                dec!("0.09")
+            } else {
+                dec!("0.08")
+            };
+
+            return interest
         }
 
         fn check_loan_nft(&self, loan_id: &NonFungibleId) -> Decimal {
