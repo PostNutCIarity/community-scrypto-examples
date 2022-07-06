@@ -27,7 +27,7 @@ blueprint! {
         borrow_fees: Decimal,
         interest: Decimal,
         xrd_usd: Decimal,
-        user_management_address: ComponentAddress,
+        user_management: ComponentAddress,
         /// Access badge to call permissioned method from the UserManagement component.
         access_vault: Vault,
         max_borrow: Decimal,
@@ -148,7 +148,7 @@ blueprint! {
                 borrow_fees: dec!(".01"),
                 interest: dec!(".02"),
                 xrd_usd: dec!("1.0"),
-                user_management_address: user_management_address,
+                user_management: user_management_address,
                 access_vault: Vault::with_bucket(access_badge),
                 max_borrow: dec!("0.5"),
                 min_health_factor: dec!("1.0"),
@@ -168,7 +168,7 @@ blueprint! {
         pub fn set_price(&mut self, user_id: NonFungibleId, xrd_price: Decimal) {
             self.xrd_usd = xrd_price;
             info!("XRD price has been set to {}", xrd_price);
-            let user_management: UserManagement = self.user_management_address.into();
+            let user_management: UserManagement = self.user_management.into();
             let nft_resource = user_management.get_nft();
             let user_resource_manager = borrow_resource_manager!(nft_resource);
             let sbt_data: User = user_resource_manager.get_non_fungible_data(&user_id);
@@ -259,7 +259,7 @@ blueprint! {
                 "[Pool Creation]: Can't deposit an empty bucket."
             ); 
             
-            let user_management: UserManagement = self.user_management_address.into();
+            let user_management: UserManagement = self.user_management.into();
 
             let dec_deposit_amount = deposit_amount.amount();
 
@@ -298,7 +298,7 @@ blueprint! {
         pub fn convert_from_collateral(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Bucket) {
             assert_eq!(token_address, deposit_amount.resource_address(), "Tokens must be the same.");
             
-            let user_management: UserManagement = self.user_management_address.into();
+            let user_management: UserManagement = self.user_management.into();
 
             let dec_deposit_amount = deposit_amount.amount();
 
@@ -426,7 +426,7 @@ blueprint! {
         /// * `Bucket` - Returns the loan NFT to the user.
         pub fn borrow(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, borrow_amount: Decimal) -> (Bucket, Bucket) {
 
-            let user_management: UserManagement = self.user_management_address.into();
+            let user_management: UserManagement = self.user_management.into();
             let nft_resource = user_management.get_nft();
 
             // Check borrow percent
@@ -519,7 +519,7 @@ blueprint! {
             let pool_resource_address = self.vaults.contains_key(&token_address);
             assert!(pool_resource_address == true, "Requested asset must be the same as the lending pool.");
 
-            let user_management: UserManagement = self.user_management_address.into();      
+            let user_management: UserManagement = self.user_management.into();      
 
             // Gets the user badge ResourceAddress
             let sbt_resource = user_management.get_nft();
@@ -563,7 +563,7 @@ blueprint! {
         pub fn redeem(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, redeem_amount: Decimal) -> Bucket {
 
             // Check if the NFT belongs to this lending protocol.
-            let user_management: UserManagement = self.user_management_address.into();
+            let user_management: UserManagement = self.user_management.into();
             let sbt_resource = user_management.get_nft();
             let resource_manager = borrow_resource_manager!(sbt_resource);
             let sbt: User = resource_manager.get_non_fungible_data(&user_id);
@@ -617,7 +617,7 @@ blueprint! {
             
             assert!(loans.contains(&loan_id) == true, "Requested loan repayment does not exist.");
 
-            let user_management: UserManagement = self.user_management_address.into();
+            let user_management: UserManagement = self.user_management.into();
             let dec_repay_amount = repay_amount.amount();
 
             // Update Loan NFT
