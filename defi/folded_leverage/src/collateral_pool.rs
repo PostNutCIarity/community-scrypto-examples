@@ -26,6 +26,10 @@ blueprint! {
     impl CollateralPool {
         pub fn new(user_component_address: ComponentAddress, initial_funds: Bucket, access_badge: Bucket) -> ComponentAddress {
 
+            let access_rules: AccessRules = AccessRules::new()
+            .method("withdraw_vault", rule!(require(access_badge.resource_address())))
+            .default(rule!(allow_all));
+
             assert_ne!(
                 borrow_resource_manager!(initial_funds.resource_address()).resource_type(), ResourceType::NonFungible,
                 "[Pool Creation]: Asset must be fungible."
@@ -78,7 +82,9 @@ blueprint! {
                 access_vault: Vault::with_bucket(access_badge),
                 lending_pool: None,
             }
-            .instantiate().globalize();
+            .instantiate()
+            .add_access_check(access_rules)
+            .globalize();
             return collateral_pool
         }
 
@@ -196,11 +202,11 @@ blueprint! {
             let nft_resource = user_management.get_nft();
             let resource_manager = borrow_resource_manager!(nft_resource);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-            let user_loans = nft_data.loans.iter();
+            let user_loans = nft_data.open_loans.iter();
 
             {
                 // Looping through loans in the User SBT
-                for loans in user_loans {
+                for (_token_address, loans) in user_loans {
                     let lending_pool: LendingPool = self.lending_pool.unwrap().into();
                     let loan_resource = lending_pool.loan_nft();
                     let resource_manager = borrow_resource_manager!(loan_resource);
@@ -253,13 +259,13 @@ blueprint! {
             let user_management: UserManagement = self.user_management.into();
             let sbt_resource = user_management.get_nft();
             let resource_manager = borrow_resource_manager!(sbt_resource);
-            let sbt: User = resource_manager.get_non_fungible_data(&user_id);
-            let user_loans = sbt.loans.iter();
+            let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+            let user_loans = sbt_data.open_loans.iter();
 
             let lending_pool: LendingPool = self.lending_pool.unwrap().into();
             let loan_id = lending_pool.loan_nft();
 
-            for loans in user_loans {
+            for (_token_address, loans) in user_loans {
                 let resource_manager = borrow_resource_manager!(loan_id);
                 let loan_data: Loan = resource_manager.get_non_fungible_data(&loans);
                 let check_paid_off = loan_data.loan_status;
@@ -275,47 +281,44 @@ blueprint! {
             return bucket;
         }
 
-        pub fn check_total_supplied(&self, token_address: ResourceAddress) -> Decimal {
+        pub fn check_total_collateral_supplied(&self, token_address: ResourceAddress) -> Decimal {
             let vault = self.collateral_vaults.get(&token_address).unwrap();
+            info!("The total collateral supplied in this pool is {:?}", vault.amount());
             return vault.amount()
         }
 
-        pub fn liquidate(&mut self, loan_id: NonFungibleId, address: ResourceAddress, repay_amount: Bucket) -> Bucket {
-            
-            // Check to  make sure that the loan can be liquidated
-            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
-            let get_loan_resource = lending_pool.get_loan_resource();
-            let resource_manager = borrow_resource_manager!(get_loan_resource);
-            let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
-            let bad_loans = lending_pool.bad_loans();
-            
-            assert!(bad_loans.contains(&loan_id) == true, "This loan cannot be liquidated.");
-
-            // Take collateral and liquidate
-            let user_id = loan_data.owner;
-
-            // Calculate amount returned
-            assert!(repay_amount.amount() <= loan_data.remaining_balance * dec!("0.5"), "Max repay amount exceeded.");
-
-            let eq_xrd_collateral = repay_amount.amount() / lending_pool.retrieve_xrd_price();
-
-            assert_eq!(repay_amount.amount(), eq_xrd_collateral, "Incorrect calculation");
-
-            let xrd_taken = eq_xrd_collateral + ( eq_xrd_collateral * dec!("0.5") );
-
-            // Update User State
-            let user_management: UserManagement = self.user_management.into();
-            user_management.inc_default(user_id.clone());
-
-            // Update loan
-            lending_pool.default_loan(loan_id);
-
-            lending_pool.deposit(user_id, address, repay_amount);
-
+        pub fn withdraw_vault(&mut self, amount: Decimal) -> Bucket
+        {
             let addresses: Vec<ResourceAddress> = self.addresses();
-            let claim_liquidation: Bucket = self.withdraw(addresses[0], xrd_taken);
+            let bucket: Bucket = self.withdraw(addresses[0], amount);
+            return bucket
+        }
 
-            return claim_liquidation
+        pub fn liquidatev2(&mut self, loan_id: NonFungibleId)
+        {
+            // Retrieves lending pool component
+            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+            // Retrieves loan NFT resource address
+            let get_loan_resource = lending_pool.get_loan_resource();
+            // Borrows resource manager to get NFT data
+            let resource_manager = borrow_resource_manager!(get_loan_resource);
+            // Retreieves loan NFT data
+            let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
+            // Asserts that the loan liquidation price is less than or equal to the current price of XRD
+            assert!(loan_data.liquidation_price <= lending_pool.retrieve_xrd_price(), "Can't liquidate this loan since the price of XRD is >= liquidation price");
+
+            // Retrieves collateral amount
+            let liquidation_amount = loan_data.collateral_amount;
+            // Retrieves resource address of the vault
+            let addresses: Vec<ResourceAddress> = self.addresses();
+            // Takes amount owed to lenders
+            let mut liquidated_bucket: Bucket = self.withdraw(addresses[0], liquidation_amount);
+            // Retrieves the owed amounts to lenders
+            let amount_owed_to_lender = loan_data.remaining_balance;
+            // Takes the owed amount to lenders
+            let return_owed: Bucket = liquidated_bucket.take(amount_owed_to_lender);
+            // Returns amount owed to lenders in the lending pool
+
         }
     }
 }

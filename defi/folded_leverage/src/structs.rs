@@ -10,13 +10,17 @@ use scrypto::prelude::*;
 #[derive(NonFungibleData, Describe, Encode, Decode, TypeId)]
 pub struct User {
     #[scrypto(mutable)]
+    pub credit_score: u64,
+    #[scrypto(mutable)]
     pub deposit_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     pub collateral_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
     pub borrow_balance: HashMap<ResourceAddress, Decimal>,
     #[scrypto(mutable)]
-    pub loans: BTreeSet<NonFungibleId>,
+    pub open_loans: HashMap<ResourceAddress, NonFungibleId>,
+    #[scrypto(mutable)]
+    pub closed_loans: HashMap<ResourceAddress, NonFungibleId>,
     #[scrypto(mutable)]
     pub defaults: u64,
     #[scrypto(mutable)]
@@ -47,10 +51,12 @@ pub struct Loan {
     #[scrypto(mutable)]
     pub health_factor: Decimal,
     #[scrypto(mutable)]
+    pub liquidation_price: Decimal,
+    #[scrypto(mutable)]
     pub loan_status: Status,
 }
 
-#[derive(TypeId, Encode, Decode, Describe, PartialEq)]
+#[derive(TypeId, Encode, Decode, Describe, Debug, PartialEq)]
 pub enum Status {
     PaidOff,
     Defaulted,

@@ -94,5 +94,24 @@ blueprint! {
 
             return claim_liquidation
         }
+
+        pub fn liquidatev2(&mut self, loan_id: NonFungibleId)
+        {
+            // Retrieves lending pool component
+            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+            // Retrieves loan NFT resource address
+            let get_loan_resource = lending_pool.get_loan_resource();
+            // Borrows resource manager to get NFT data
+            let resource_manager = borrow_resource_manager!(get_loan_resource);
+            // Retreieves loan NFT data
+            let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
+            // Asserts that the loan liquidation price is less than or equal to the current price of XRD
+            assert!(!(loan_data.liquidation_price <= lending_pool.retrieve_xrd_price()), "Can't liquidate this loan since the price of XRD is >= liquidation price");
+
+            // Retreives collateral pool component
+            let collateral_pool: CollateralPool = self.collateral_pool.unwrap().into();
+            //
+
+        }
     }
 }

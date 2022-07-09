@@ -6,8 +6,7 @@ resim call-method $comp deposit_supply "1,$proof" "$xrd" "1000,$xrd"
 resim call-method $comp deposit_collateral 1,$proof $xrd 1000,$xrd
 resim call-method $comp convert_to_collateral 1,$proof $xrd 1000
 resim call-method $comp convert_to_deposit 1,$proof $xrd 1000
-resim call-method $collateral check_total_supplied $xrd
-resim call-method $lending check_total_supplied $xrd
+
 resim call-method $comp create_transient_token --manifest ./transactions/create_token.rtm
 resim call-method $comp borrow "1,$proof" "$xrd" 1000
 resim call-method $comp repay 1,$proof $loan $xrd 1000,$xrd
@@ -21,13 +20,16 @@ resim call-method $lending set_address $collateral
 resim call-method $collateral set_address $lending 
 resim call-method $comp set_address $xrd $lending $collateral $user
 
-resim call-method $lending check_total_borrowed $xrd
+resim call-method $comp check_total_supplied $xrd
+resim call-method $comp check_total_collateral_supplied $xrd
+resim call-method $comp check_total_borrowed $xrd
 
 resim call-method $comp set_price 1,$proof $xrd 0.5
 resim call-method $comp find_bad_loans $xrd
 resim call-method $comp liquidate $loan $xrd 1000,$xrd
 
-// Do we even need the borrowed tokens?
+$xrd="030000000000000000000000000000000000000000000000000004"
+
 /// Add access control to UserManagement
 /// Security for inc_paid_off?
 /// Does the total borrow include interest expense?
@@ -35,3 +37,6 @@ resim call-method $comp liquidate $loan $xrd 1000,$xrd
 
 /// finish liquidation
 /// think about credit worthiness and sliding collateralization
+/// Should interest rate change when you borrow additional?
+/// Work on borrow_additional design
+/// Prevent multiple SBTs

@@ -16,10 +16,7 @@ blueprint! {
         nft_address: ResourceAddress,
         /// This is the user record registry. It is meant to allow people to query the users that belongs to this protocol.
         pub user_record: HashMap<NonFungibleId, User>,
-        /// This is the resource address of the transient token that will be sent to the user management component.
-        /// It is used to verify that the transient token that is sent to the user management component belongs to
-        /// the pools of this protocol.
-        allowed_resource: Vec<ResourceAddress>,
+        account_record: Vec<ComponentAddress>,
     }
 
     /// Instantiates the User Management component. This is instantiated through the main router component. 
@@ -31,7 +28,23 @@ blueprint! {
     impl UserManagement {
         pub fn new(allowed: ResourceAddress) -> ComponentAddress {
 
-            // let access_rules: AccessRules = AccessRules::new().default(rule!(require(allowed)));
+            let access_rules: AccessRules = AccessRules::new()
+            .method("new_user", rule!(require(allowed)))
+            .method("inc_credit_score", rule!(require(allowed)))
+            .method("dec_credit_score", rule!(require(allowed)))
+            .method("add_deposit_balance", rule!(require(allowed)))
+            .method("decrease_deposit_balance", rule!(require(allowed)))
+            .method("increase_borrow_balance", rule!(require(allowed)))
+            .method("decrease_borrow_balance", rule!(require(allowed)))
+            .method("add_collateral_balance", rule!(require(allowed)))
+            .method("decrease_collateral_balance", rule!(require(allowed)))
+            .method("inc_paid_off", rule!(require(allowed)))
+            .method("inc_default", rule!(require(allowed)))
+            .method("insert_loan", rule!(require(allowed)))
+            .method("close_loan", rule!(require(allowed)))
+            .method("convert_deposit_to_collateral", rule!(require(allowed)))
+            .method("convert_collateral_to_deposit", rule!(require(allowed)))
+            .default(rule!(allow_all));
 
             // Badge that will be stored in the component's vault to provide authorization to update the User NFT.
             let lending_protocol_user_badge = ResourceBuilder::new_fungible()
@@ -52,10 +65,10 @@ blueprint! {
                 user_badge_vault: Vault::with_bucket(lending_protocol_user_badge),
                 nft_address: nft_address,
                 user_record: HashMap::new(),
-                allowed_resource: Vec::from([allowed]),
+                account_record: Vec::new(),
             }
             .instantiate()
-            // .add_access_check(access_rules)
+            .add_access_check(access_rules)
             .globalize()
         }
 
@@ -63,8 +76,11 @@ blueprint! {
         // User is created to track the deposit balance, borrow balance, and the token of each.
         // Token is registered by extracting the resource address of the token they deposited.
         // Users are not given a badge. Badge is used by the protocol to update the state. Users are given an NFT to identify as a user.
-        pub fn new_user(&mut self) -> Bucket {
+        pub fn new_user(&mut self, account_address: ComponentAddress) -> Bucket {
 
+            // Checks whether the account address has already registered an SBT
+            assert_ne!(self.account_record.contains(&account_address), true, "SBT already created for this account.");
+            
             // Mint NFT to give to users as identification 
             let user_nft = self.user_badge_vault.authorize(|| {
                 let resource_manager: &ResourceManager = borrow_resource_manager!(self.nft_address);
@@ -73,10 +89,12 @@ blueprint! {
                     &NonFungibleId::random(),
                     // The User data
                     User {
+                        credit_score: 0,
                         borrow_balance: HashMap::new(),
                         deposit_balance: HashMap::new(),
                         collateral_balance: HashMap::new(),
-                        loans: BTreeSet::new(),
+                        open_loans: HashMap::new(),
+                        closed_loans: HashMap::new(),
                         defaults: 0,
                         paid_off: 0,
                     },
@@ -84,15 +102,18 @@ blueprint! {
             });
             
             // Registers the user to the user_record HashMap
-            {let user_id: NonFungibleId = user_nft.non_fungible::<User>().id();
+            {
+                let user_id: NonFungibleId = user_nft.non_fungible::<User>().id();
                 let user: User = user_nft.non_fungible().data();
-                self.user_record.insert(user_id, user);}
+                self.user_record.insert(user_id, user);
+                self.account_record.push(account_address);
+            }
 
             // Returns NFT to user
             return user_nft
         }
 
-        fn call_resource_mananger(&mut self, user_id: &NonFungibleId) -> User {
+        fn call_resource_mananger(&self, user_id: &NonFungibleId) -> User {
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let sbt: User = resource_manager.get_non_fungible_data(&user_id);
             return sbt
@@ -108,13 +129,6 @@ blueprint! {
         pub fn get_nft(&self) -> ResourceAddress {
             return self.nft_address;
         }
-
-        /// This method is used by the pool component to register the resource address of the transient
-        /// token minted, so that the User Management component can check that the transient token passed
-        /// to this component indeed belongs to the pool.
-        pub fn register_resource(&mut self, resource_address: ResourceAddress) {
-            self.allowed_resource.push(resource_address)
-        }
         
         /// Takes in the NonFungibleId and reveals whether this NonFungibleId belongs to the protocol.
         fn find_user(&self, user_id: &NonFungibleId) -> bool {
@@ -128,11 +142,36 @@ blueprint! {
 
         /// Need help on error regarding the unwrap 06/01/22
         /// Need to think about this more whether it needs to equal exactly zero
-        fn check_lien(&self, user_id: &NonFungibleId, token_requested: &ResourceAddress) {
+        fn check_lien(&self, user_id: &NonFungibleId, token_requested: &ResourceAddress) 
+        {
             // Check if deposit withdrawal request has no lien
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             return assert_eq!(nft_data.borrow_balance.get(&token_requested).unwrap_or(&Decimal::zero()), &Decimal::zero(), "User need to repay loan")
+        }
+
+        pub fn inc_credit_score(&mut self, user_id: NonFungibleId, amount: u64)
+        {
+            // Calls the resource manager.
+            let mut sbt_data = self.call_resource_mananger(&user_id);
+
+            // Increases the credit score.
+            sbt_data.credit_score += amount;
+
+            // Authorizes the update.
+            self.authorize_update(&user_id, sbt_data);
+        }
+
+        pub fn dec_credit_score(&mut self, user_id: NonFungibleId, amount: u64)
+        {
+            // Calls the resource manager.
+            let mut sbt_data = self.call_resource_mananger(&user_id);
+
+            // Increases the credit score.
+            sbt_data.credit_score -= amount;
+
+            // Authorizes the update.
+            self.authorize_update(&user_id, sbt_data);
         }
 
         /// Adds the deposit balance
@@ -224,7 +263,7 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `None` - The method simply updates the User NFT
-        pub fn add_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
+        pub fn increase_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
 
             // Asserts user exists
             self.assert_user_exist(&user_id);
@@ -351,18 +390,30 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `None` - This method simply updates the User NFT.
-        pub fn insert_loan(&mut self, user_id: NonFungibleId, loan_id: NonFungibleId) {
+        pub fn insert_loan(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, loan_id: NonFungibleId) {
 
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
             let mut sbt_data = self.call_resource_mananger(&user_id);
 
-            if sbt_data.loans.contains(&loan_id) {
+            if sbt_data.open_loans.contains_key(&token_address) {
                 info!("Loan has already been recorded.")
             } else {
-                sbt_data.loans.insert(loan_id);
+                sbt_data.open_loans.insert(token_address, loan_id);
             }
+
+            self.authorize_update(&user_id, sbt_data);
+        }
+
+        pub fn close_loan(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, loan_id: NonFungibleId) {
+
+            // Asserts user exists
+            self.assert_user_exist(&user_id);
+
+            let mut sbt_data = self.call_resource_mananger(&user_id);
+            sbt_data.open_loans.remove_entry(&token_address);
+            sbt_data.closed_loans.insert(token_address, loan_id);
 
             self.authorize_update(&user_id, sbt_data);
         }
@@ -464,6 +515,50 @@ blueprint! {
                 self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
                 return Decimal::zero()
             };
+        }
+
+        pub fn credit_score_modifier(&self, user_id: NonFungibleId) -> Decimal 
+        {
+            let sbt_data = self.call_resource_mananger(&user_id);
+            let credit_score = sbt_data.credit_score;
+            if credit_score >= 100 && credit_score < 200 {
+                return dec!(".01")
+            } else if credit_score >= 200 && credit_score < 300 {
+                return dec!(".02")
+            } else if credit_score >= 300 {
+                return dec!(".03")
+            } else {
+                return dec!("0.0")
+            }
+        }
+
+        pub fn credit_score_test(&mut self, user_id: NonFungibleId, credit_score: u64)
+        {
+            let mut sbt_data = self.call_resource_mananger(&user_id);
+            sbt_data.credit_score += credit_score;
+            self.authorize_update(&user_id, sbt_data);
+        }
+
+        pub fn get_sbt_info(&self, user_id: NonFungibleId)
+        {
+            let sbt_data = self.call_resource_mananger(&user_id);
+            let credit_score = sbt_data.credit_score;
+            let deposit_balance = sbt_data.deposit_balance;
+            let collateral_balance = sbt_data.collateral_balance;
+            let borrow_balance = sbt_data.borrow_balance;
+            let open_loans = sbt_data.open_loans;
+            let closed_loans = sbt_data.closed_loans;
+            let defaults = sbt_data.defaults;
+            let paid_off = sbt_data.paid_off;
+
+            info!("[User SBT]: Credit Score: {:?}", credit_score);
+            info!("[User SBT]: Deposit Balance: {:?}", deposit_balance);
+            info!("[User SBT]: Collateral Balance: {:?}", collateral_balance);
+            info!("[User SBT]: Borrow Balance: {:?}", borrow_balance);
+            info!("[User SBT]: Open Loans: {:?}", open_loans);
+            info!("[User SBT]: Closed Loans: {:?}", closed_loans);
+            info!("[User SBT]: Number of times liquidated: {:?}", defaults);
+            info!("[User SBT]: Number of loans paid off: {:?}", paid_off);
         }
     }
 }
