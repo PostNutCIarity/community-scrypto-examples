@@ -1,5 +1,6 @@
 use scrypto::prelude::*;
 use crate::user_management::*;
+use crate::pseudopriceoracle::*;
 use crate::collateral_pool::*;
 use crate::structs::{User, Loan, Status};
 
@@ -15,19 +16,18 @@ blueprint! {
         /// to claim fees. Still need to be discussed.
         supplied_amount: Decimal,
         borrow_amount: Decimal,
-        fee_vault: Vault,
+        origination_fees_collected: Decimal,
+        interest_fees_collected: Decimal,
         /// Temporary static fee as of now. 
         borrow_fees: Decimal,
         xrd_usd: Decimal,
         user_management: ComponentAddress,
+        pseudopriceoracle: ComponentAddress,
         /// Access badge to call permissioned method from the UserManagement component.
         access_vault: Vault,
         max_borrow: Decimal,
         min_health_factor: Decimal,
         min_collaterization: Decimal,
-        /// It's meant to retrieve the NFT resource of the User, but will be TBD for now.
-        nft_address: Vec<ResourceAddress>,
-        nft_id: Vec<NonFungibleId>,
         /// The Lending Pool is a shared pool which shares resources with the collateral pool. This allows the lending pool to access methods from the collateral pool.
         collateral_pool: Option<ComponentAddress>,
         /// This badge creates the NFT loan. Perhaps consolidate the admin badges?
@@ -70,8 +70,13 @@ blueprint! {
         /// 
         /// * `ComponentAddress` - The ComponentAddress of the newly created LendingPool.
         /// * `Bucket` - The transient token minted.
-        pub fn new(user_component_address: ComponentAddress, initial_funds: Bucket, access_badge: Bucket) -> ComponentAddress {
-
+        pub fn new(
+            user_component_address: ComponentAddress,
+            pseudopriceoracle_address: ComponentAddress,
+            initial_funds: Bucket, 
+            access_badge: Bucket
+        ) -> ComponentAddress 
+        {
             assert_ne!(
                 borrow_resource_manager!(initial_funds.resource_address()).resource_type(), ResourceType::NonFungible,
                 "[Pool Creation]: Asset must be fungible."
@@ -83,9 +88,7 @@ blueprint! {
             ); 
 
             let user_management_address: ComponentAddress = user_component_address;
-
-            // Define the resource address of the fees collected
-            let funds_resource_def = initial_funds.resource_address();
+            let pseudopriceoracle_address: ComponentAddress = pseudopriceoracle_address;
 
             // Badge that will be stored in the component's vault to update loan NFT.
             let loan_issuer_badge = ResourceBuilder::new_fungible()
@@ -113,16 +116,16 @@ blueprint! {
                 vaults: vaults,
                 supplied_amount: initial_funds_amount,
                 borrow_amount: Decimal::zero(),
-                fee_vault: Vault::new(funds_resource_def),
+                origination_fees_collected: Decimal::zero(),
+                interest_fees_collected: Decimal::zero(),
                 borrow_fees: dec!(".01"),
                 xrd_usd: dec!("1.0"),
                 user_management: user_management_address,
+                pseudopriceoracle: pseudopriceoracle_address,
                 access_vault: Vault::with_bucket(access_badge),
                 max_borrow: dec!("0.5"),
                 min_health_factor: dec!("1.0"),
                 min_collaterization: dec!("1.5"),
-                nft_address: Vec::new(),
-                nft_id: Vec::new(),
                 collateral_pool: None,
                 loan_issuer_badge: Vault::with_bucket(loan_issuer_badge),
                 loan_address: loan_nft_address,
@@ -149,17 +152,45 @@ blueprint! {
                 let test = loan_data.remaining_balance;
                 let col_test = loan_data.collateral_amount;
                 loan_data.health_factor = ( ( col_test * xrd_price ) * dec!("0.8") ) / ( test );
-
                 self.loan_issuer_badge.authorize(|| resource_manager.update_non_fungible_data(loans, loan_data));
             }   
         }
 
-        pub fn retrieve_xrd_price(&self) -> Decimal {
+        pub fn update_loan(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            collateral_address: ResourceAddress,
+        )
+        {
+            let user_management: UserManagement = self.user_management.into();
+            let nft_resource = user_management.get_nft();
+            let user_resource_manager = borrow_resource_manager!(nft_resource);
+            let sbt_data: User = user_resource_manager.get_non_fungible_data(&user_id);
+            let loan_id = sbt_data.open_loans.get(&token_address).unwrap(); 
+
+            let mut loan_data = self.call_resource_mananger(&loan_id);
+            let remaining_balance = loan_data.remaining_balance;
+            let pseudopriceoracle: PseudoPriceOracle = self.pseudopriceoracle.into();
+            let price = pseudopriceoracle.get_price(collateral_address);
+            let collateral_amount = loan_data.collateral_amount;
+            loan_data.health_factor = ( ( collateral_amount * price ) * dec!("0.8") ) / ( remaining_balance );
+            loan_data.collateral_amount_usd = collateral_amount * price;
+            self.authorize_update(&loan_id, loan_data);
+        }
+
+        pub fn retrieve_xrd_price(
+            &self
+        ) -> Decimal 
+        {
             return self.xrd_usd;
         }
 
         /// Returns the ResourceAddress of the loan NFTs so the collateral pool component can access the NFT data.
-        pub fn loan_nft(&self) -> ResourceAddress {
+        pub fn loan_nft(
+            &self
+        ) -> ResourceAddress 
+        {
             return self.loan_address;
         }
 
@@ -171,16 +202,6 @@ blueprint! {
         /// Sets the liquidation component ComponentAddress so that the lending pool can access the method calls.
         pub fn set_liquidation_address(&mut self, component_address: ComponentAddress) {
             self.liquidation_component.get_or_insert(component_address);
-        }
-        
-        /// TBD
-        pub fn register_user(&mut self, nft_resource_address: ResourceAddress) {
-            self.nft_address.push(nft_resource_address);
-        }
-
-        /// TBD
-        pub fn register_user_id(&mut self, nft_id: NonFungibleId) {
-            self.nft_id.push(nft_id);
         }
 
         /// Deposits supply into the lending pool.
@@ -206,8 +227,13 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `None` - Nothing is returned.
-        pub fn deposit(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Bucket) {
-            
+        pub fn deposit(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            deposit_amount: Bucket
+        ) 
+        {
             // Asserts that the bucket resource and the token resource address is the same.
             assert_eq!(token_address, deposit_amount.resource_address(), "Tokens must be the same.");
 
@@ -270,7 +296,13 @@ blueprint! {
         /// # Design questions: 
         /// * Should this method be protected that only Collateral Component can call? 06/11/22
         /// * Currently, anyone can essentially deposit.
-        pub fn convert_from_collateral(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Bucket) {
+        pub fn convert_from_collateral(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            deposit_amount: Bucket
+        ) 
+        {
             assert_eq!(token_address, deposit_amount.resource_address(), "Tokens must be the same.");
             
             let user_management: UserManagement = self.user_management.into();
@@ -291,7 +323,10 @@ blueprint! {
         /// # Returns:
         /// 
         /// `Vec<ResourceAddress>` - A vector of the resource addresses of the tokens in this liquidity pool.
-        pub fn addresses(&self) -> Vec<ResourceAddress> {
+        pub fn addresses(
+            &self
+        ) -> Vec<ResourceAddress> 
+        {
             return self.vaults.keys().cloned().collect::<Vec<ResourceAddress>>();
         }
 
@@ -310,7 +345,8 @@ blueprint! {
         pub fn belongs_to_pool(
             &self, 
             address: ResourceAddress
-        ) -> bool {
+        ) -> bool 
+        {
             return self.vaults.contains_key(&address);
         }
 
@@ -329,7 +365,8 @@ blueprint! {
             &self, 
             address: ResourceAddress, 
             label: String
-        ) {
+        ) 
+        {
             assert!(
                 self.belongs_to_pool(address), 
                 "[{}]: The provided resource address does not belong to the pool.", 
@@ -354,7 +391,12 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `Bucket` - A bucket of the withdrawn tokens.
-        fn withdraw(&mut self, resource_address: ResourceAddress, amount: Decimal) -> Bucket {
+        fn withdraw(
+            &mut self,
+            resource_address: ResourceAddress,
+            amount: Decimal
+        ) -> Bucket
+        {
             // Performing the checks to ensure that the withdraw can actually go through
             self.assert_belongs_to_pool(resource_address, String::from("Withdraw"));
             
@@ -365,7 +407,6 @@ blueprint! {
                 "[Withdraw]: Not enough liquidity available for the withdraw."
             );
             
-
             return vault.take(amount);
         }
 
@@ -402,17 +443,31 @@ blueprint! {
         /// 
         /// * `Bucket` - Returns a bucket of the borrowed funds from the pool.
         /// * `Bucket` - Returns the loan NFT to the user.
-        pub fn borrow(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, borrow_amount: Decimal) -> (Bucket, Bucket) {
-
+        pub fn borrow(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            collateral_address: ResourceAddress,
+            borrow_amount: Decimal
+        ) -> (Bucket, Bucket) 
+        {
+            // Retreieves User Management component
             let user_management: UserManagement = self.user_management.into();
+            // Retrieves SBT resource address
             let nft_resource = user_management.get_nft();
 
-            // Check borrow percent
+            // Borrow resource manager to view SBT data
             let resource_manager = borrow_resource_manager!(nft_resource);
             let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+            // Retrieve collateral balance amount
             // It's unwrap because if the user does not have collateral, it will panic.
-            let collateral_amount = *sbt_data.collateral_balance.get(&token_address).unwrap_or(&Decimal::zero());
-            assert!(borrow_amount <= collateral_amount * self.max_borrow, "Borrow amount must be less than or equals to 50% of your collateral.");
+            let collateral_amount = *sbt_data.collateral_balance.get(&collateral_address).unwrap_or(&Decimal::zero());
+            // Calculate collateral value
+            let pseudopriceoracle: PseudoPriceOracle = self.pseudopriceoracle.into();
+            let price = pseudopriceoracle.get_price(collateral_address);
+            let collateral_value = collateral_amount * price;
+            // Assert
+            assert!(borrow_amount <= collateral_value * self.max_borrow, "Borrow amount must be less than or equals to 50% of your collateral.");
 
             // Checks open loan positions
             assert_ne!(sbt_data.open_loans.contains_key(&token_address), true, "Existing loan position for {:?} already exist", token_address);
@@ -422,10 +477,12 @@ blueprint! {
             let fee_charged = borrow_amount * fee;
             let actual_borrow = borrow_amount - fee_charged;
 
+            self.origination_fees_collected += fee_charged;
+
             // Minting tracking tokens to be deposited to borrowed_vault to track borrows from this pool and deposits to the pool's borrowed vault.
             self.borrow_amount += actual_borrow;
 
-            let interest_rate = self.interest_calc(token_address);
+            let interest_rate = self.interest_calc();
 
             let modifier = user_management.credit_score_modifier(user_id.clone());
 
@@ -436,9 +493,9 @@ blueprint! {
 
             let remaining_amount = actual_borrow + interest_expense;
 
-            let health_factor = ( ( collateral_amount * self.xrd_usd ) * dec!("0.8") ) / ( actual_borrow + interest_expense );
+            let health_factor = ( ( collateral_amount * price ) * dec!("0.8") ) / ( remaining_amount );
 
-            let liquidation_price = ( actual_borrow * self.xrd_usd ) * self.min_collaterization  / collateral_amount; 
+            let liquidation_price = ( remaining_amount * price ) * self.min_collaterization  / collateral_amount; 
 
             // Mint loan NFT
             let loan_nft = self.loan_issuer_badge.authorize(|| {
@@ -449,13 +506,13 @@ blueprint! {
                     // The User data
                     Loan {
                         asset: token_address,
-                        collateral: token_address,
+                        collateral: collateral_address,
                         principal_loan_amount: borrow_amount,
-                        interest: modified_interest_rate,
+                        interest_rate: modified_interest_rate,
                         owner: user_id.clone(),
                         remaining_balance: remaining_amount,
                         collateral_amount: collateral_amount,
-                        collateral_amount_usd: collateral_amount * self.xrd_usd,
+                        collateral_amount_usd: collateral_value,
                         health_factor: health_factor,
                         liquidation_price: liquidation_price,
                         interest_expense: interest_expense,
@@ -474,7 +531,7 @@ blueprint! {
             info!("[Loan NFT]: Principal Loan Amount: {:?}", borrow_amount);
             info!("[Loan NFT]: Interest Rate: {:?}", modified_interest_rate);
             info!("[Loan NFT]: Owner: {:?}", user_id.clone());
-            info!("[Loan NFT]: Remaining Balance: {:?}", actual_borrow);
+            info!("[Loan NFT]: Remaining Balance: {:?}", remaining_amount);
             info!("[Loan NFT]: Collateral amount: {:?}", collateral_amount);
             info!("[Loan NFT]: Health Factor: {:?}", health_factor);
             info!("[Loan NFT]: Interest Expense: {:?}", interest_expense);
@@ -499,16 +556,21 @@ blueprint! {
 
             info!("You were able to reduce your interest rate by {:?} percent due to your credit!", modifier);
             info!(
-                "Your original interest rate was {:?} and the utilization rate is {:?}",
-                self.interest_calc(token_address),
-                self.check_utilization_rate(token_address)
+                "Your original interest rate was {:?}",
+                self.interest_calc()
             );
 
             return (return_borrow_amount, loan_nft)
         }
 
-        pub fn borrow_additional(&mut self, user_id: NonFungibleId, loan_id: NonFungibleId, token_address: ResourceAddress, borrow_amount: Decimal) -> Bucket {
-
+        pub fn borrow_additional(
+            &mut self,
+            user_id: NonFungibleId,
+            loan_id: NonFungibleId,
+            token_address: ResourceAddress,
+            borrow_amount: Decimal
+        ) -> Bucket 
+        {
             let user_management: UserManagement = self.user_management.into();
             let sbt_resource = user_management.get_nft();
             let resource_manager = borrow_resource_manager!(sbt_resource);
@@ -527,29 +589,41 @@ blueprint! {
             let fee_charged = borrow_amount * fee;
             let actual_borrow = borrow_amount - fee_charged;
 
-            // Calculate interest expense
-            let interest_expense = borrow_amount * dec!("0.02");
-
-            // Minting tracking tokens to be deposited to borrowed_vault to track borrows from this pool and deposits to the pool's borrowed vault.
+            self.origination_fees_collected += fee_charged;
             self.borrow_amount += actual_borrow;
 
-            let interest_rate = self.interest_calc(token_address);
+            // Calculate interest rate. Interest rate will be modified based on new utilization rate and modifier based on user credit score.
+            let interest_rate = self.interest_calc();
+
+            // Calculate modifier based on user credit score
+            let modifier = user_management.credit_score_modifier(user_id.clone());
+
+            let modified_interest_rate = interest_rate - modifier;
+
+            // Calculate interest expense
+            let interest_expense = borrow_amount * modified_interest_rate;
 
             // Change loan NFT data
             // Get the resource manager
             let mut loan_data = self.call_resource_mananger(&loan_id);
             // Asserts that loan status must be current.
             assert_eq!(loan_data.loan_status, Status::Current, "Loan status must be current.");
-            // Increase borrow balance on the loan NFT.
-            loan_data.remaining_balance += borrow_amount + interest_expense;
-            //
+            // Take the previous interest rate
+            let previous_interest_rate = loan_data.interest_rate;
+            // Blend the two interest rate
+            let blended_interest_rate =  previous_interest_rate + modified_interest_rate / dec!("2.0");
+            // Change the interest rate on the loan /nft
+            loan_data.interest_rate = blended_interest_rate;
+            // Increase borrow balance on the loan NFT
+            loan_data.remaining_balance += actual_borrow + interest_expense;
+            // Increase interest expense on the loan NFT
             loan_data.interest_expense += interest_expense;
             // Checks whether if the health factor of the loan is greater than one.
             assert!(loan_data.health_factor >= Decimal::one(), "Loan factor must be greater than one.");
 
             // Authorize to increase borrow balance of the user
             self.access_vault.authorize(|| {
-                user_management.increase_borrow_balance(user_id, token_address, borrow_amount)
+                user_management.increase_borrow_balance(user_id, token_address, actual_borrow)
                 }
             );
 
@@ -558,8 +632,11 @@ blueprint! {
 
             // Withdrawing the amount of tokens owed to this lender
             let addresses: Vec<ResourceAddress> = self.addresses();
-            let bucket: Bucket = self.withdraw(addresses[0], borrow_amount);
-            return bucket;
+            let return_borrow_amount: Bucket = self.withdraw(addresses[0], actual_borrow);
+            return return_borrow_amount;
+
+            info!("You have borrowed {:?} of {:?}", actual_borrow, token_address);
+
         }
 
 
@@ -588,8 +665,13 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `None` - Nothing is returned.
-        pub fn convert_to_collateral(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, deposit_collateral: Decimal) {
-
+        pub fn convert_to_collateral(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            deposit_collateral: Decimal
+        ) 
+        {
             let pool_resource_address = self.vaults.contains_key(&token_address);
             assert!(pool_resource_address == true, "Requested asset must be the same as the lending pool.");
 
@@ -634,8 +716,13 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `Bucket` - A Bucket of the tokens to be redeemed.
-        pub fn redeem(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, redeem_amount: Decimal) -> Bucket {
-
+        pub fn redeem(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            redeem_amount: Decimal
+        ) -> Bucket 
+        {
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management.into();
             let sbt_resource = user_management.get_nft();
@@ -691,8 +778,14 @@ blueprint! {
         /// 
         /// # Design questions:
         /// * Ideally we would only need the user_id and loans are identified by the protocol as opposed to the user having to retrieve the loan NFT.
-        pub fn repay(&mut self, user_id: NonFungibleId, loan_id: NonFungibleId, token_address: ResourceAddress, mut repay_amount: Bucket) -> Bucket {
-
+        pub fn repay(
+            &mut self,
+            user_id: NonFungibleId,
+            loan_id: NonFungibleId,
+            token_address: ResourceAddress,
+            mut repay_amount: Bucket
+        ) -> Bucket 
+        {
             let loans = &self.loans;
             
             assert!(loans.contains(&loan_id) == true, "Requested loan repayment does not exist.");
@@ -704,13 +797,28 @@ blueprint! {
             // Borrow resource manager
             let mut loan_data = self.call_resource_mananger(&loan_id);
 
+            // Asserts that the loan isn't already paid off
             assert_ne!(loan_data.loan_status, Status::PaidOff, "The loan has already been paid off!");
+
+            // Retrieve remaining loan balance
+            let remaining_balance = loan_data.remaining_balance;
+
+            let overpaid = dec_repay_amount - remaining_balance;
+
+            // Assert overpayment. Much easier to not allow users to overpay than to calculte return of overpayment
+            assert!(dec_repay_amount <= remaining_balance,
+                "You've overpaid your loan by {:?}. Please pay the correct remaining balance: {:?}",
+                overpaid,
+                remaining_balance
+            );
 
             // Update remaining balance (includes interest expense)
             loan_data.remaining_balance -= dec_repay_amount;
 
             // Takes interest expense amount
             let interest_expense = loan_data.interest_expense;
+
+            self.interest_fees_collected += interest_expense;
 
             // Takes separates interest expense from principal loan amount
             let actual_repay_amount = repay_amount.amount() - interest_expense;
@@ -763,13 +871,21 @@ blueprint! {
 
             let to_return = repay_amount.take(to_return_amount);
 
+            info!("You have repaid {:?} of your loan", dec_repay_amount);
+
             // Deposits the repaid loan back into the supply
             self.vaults.get_mut(&repay_amount.resource_address()).unwrap().put(repay_amount);
             to_return
+
         }
 
-        pub fn liquidate(&mut self, loan_id: NonFungibleId, token_address: ResourceAddress, repay_amount: Bucket) -> Bucket {
-            
+        pub fn liquidate(
+            &mut self,
+            loan_id: NonFungibleId,
+            token_address: ResourceAddress,
+            repay_amount: Bucket
+        ) -> Bucket 
+        {
             // Check to  make sure that the loan can be liquidated
             
             assert!(self.bad_loans().contains(&loan_id) == true, "This loan cannot be liquidated.");
@@ -847,7 +963,10 @@ blueprint! {
         /// 
         /// # Design questions: 
         /// Have to test whether this actually works or not
-        pub fn insert_bad_loans(&mut self) {
+        pub fn insert_bad_loans(
+            &mut self
+        ) 
+        {
             let loan_list = &self.loans;
             let check_loans = loan_list.iter();
             for loans in check_loans {
@@ -858,17 +977,27 @@ blueprint! {
             };
         }
 
-        pub fn bad_loans(&mut self) -> BTreeSet<NonFungibleId> {
+        pub fn bad_loans(
+            &mut self
+        ) -> BTreeSet<NonFungibleId> 
+        {
             return self.bad_loans.clone();
         }
 
         /// Temporary method for now, might remove. Used by the liquidation component.
-        pub fn get_loan_resource(&self) -> ResourceAddress {
+        pub fn get_loan_resource(
+            &self
+        ) -> ResourceAddress 
+        {
             return self.loan_address;
         }
 
         /// May remove. Checks collateral ratio of the loan NFT.
-        pub fn check_collateral_ratio(&self, loan_id: NonFungibleId) -> bool {
+        pub fn check_collateral_ratio(
+            &self,
+            loan_id: NonFungibleId
+        ) -> bool 
+        {
             let resource_manager = borrow_resource_manager!(self.loan_address);
             let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
             let collateral_ratio = loan_data.health_factor;
@@ -877,7 +1006,10 @@ blueprint! {
         }
 
         /// Returns a string of bad loans from bad_loans.
-        pub fn find_bad_loans(&mut self) {
+        pub fn find_bad_loans(
+            &mut self
+        ) 
+        {
             // Pushes bad loans to the struct
             self.insert_bad_loans();
             self.remove_closed_loans();
@@ -891,7 +1023,9 @@ blueprint! {
             };
         }
                         
-        pub fn clean_bad_loans(&self) -> Vec<NonFungibleId>
+        pub fn clean_bad_loans(
+            &self
+        ) -> Vec<NonFungibleId>
         {
             let bad_loans = self.bad_loans.iter();
             let mut paid_loan: Vec<NonFungibleId> = Vec::new();
@@ -909,7 +1043,9 @@ blueprint! {
             paid_loan
         }
 
-        fn remove_closed_loans(&mut self) 
+        fn remove_closed_loans(
+            &mut self
+        ) 
         {
             let loans: Vec<NonFungibleId> = self.clean_bad_loans();
             if loans.is_empty() {
@@ -919,26 +1055,39 @@ blueprint! {
             }
         }
 
-        pub fn default_loan(&mut self, loan_id: NonFungibleId) {
+        pub fn default_loan(
+            &mut self,
+            loan_id: NonFungibleId
+        ) 
+        {
             let mut loan_data = self.call_resource_mananger(&loan_id);
             loan_data.loan_status = Status::Defaulted;
             self.authorize_update(&loan_id, loan_data)
         }
         
-        fn call_resource_mananger(&self, loan_id: &NonFungibleId) -> Loan {
+        fn call_resource_mananger(
+            &self,
+            loan_id: &NonFungibleId
+        ) -> Loan 
+        {
             let resource_manager = borrow_resource_manager!(self.loan_address);
             let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
             return loan_data
         }
 
-        fn authorize_update(&mut self, loan_id: &NonFungibleId, loan_data: Loan) {
+        fn authorize_update(
+            &mut self,
+            loan_id: &NonFungibleId,
+            loan_data: Loan) {
             let resource_manager = borrow_resource_manager!(self.loan_address);
             self.loan_issuer_badge.authorize(|| resource_manager.update_non_fungible_data(&loan_id, loan_data));
         }
 
-        pub fn interest_calc(&mut self, token_address: ResourceAddress) -> Decimal 
+        pub fn interest_calc(
+            &mut self
+        ) -> Decimal 
         {
-            let utilization_rate = self.check_utilization_rate(token_address);
+            let utilization_rate = self.check_utilization_rate();
 
             let interest = if utilization_rate > dec!(".90") {
                 dec!("0.12")
@@ -955,21 +1104,29 @@ blueprint! {
             return interest
         }
 
-        fn check_health_factor(&self, loan_id: &NonFungibleId) -> Decimal 
+        fn check_health_factor(
+            &self,
+            loan_id: &NonFungibleId
+        ) -> Decimal 
         {
             let resource_manager = borrow_resource_manager!(self.loan_address);
             let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
             return loan_data.health_factor;
         }
 
-        pub fn check_liquidity(&mut self, token_address: ResourceAddress) -> Decimal
+        pub fn check_liquidity(
+            &mut self,
+            token_address: ResourceAddress
+        ) -> Decimal
         {
             let vault: &mut Vault = self.vaults.get_mut(&token_address).unwrap();
             info!("The liquidity of this pool is {:?}", vault.amount());
             return vault.amount()
         }
 
-        pub fn check_utilization_rate(&mut self, token_address: ResourceAddress) -> Decimal
+        pub fn check_utilization_rate(
+            &mut self
+        ) -> Decimal
         {
             let borrow_amount = self.borrow_amount;
             let liquidity_amount: Decimal = borrow_amount / self.supplied_amount;
@@ -977,26 +1134,35 @@ blueprint! {
             return liquidity_amount
         }
 
-        pub fn check_total_supplied(&self, token_address: ResourceAddress) -> Decimal
+        pub fn check_total_supplied(
+            &self
+        ) -> Decimal
         {
             info!("The total supplied in this pool is {:?}", self.supplied_amount);
             return self.supplied_amount
         }
         
-        pub fn check_total_borrowed(&self) -> Decimal
+        pub fn check_total_borrowed(
+            &self
+        ) -> Decimal
         {
             let borrow_amount = self.borrow_amount;
-            info!("The total amount borrowed from this pool is {:?}", borrow_amount);
+            info!("The total amount borrowed from this pool is {:?}",
+            borrow_amount
+        );
             return borrow_amount
         }
 
-        pub fn get_loan_info(&self, loan_id: NonFungibleId)
+        pub fn get_loan_info(
+            &self,
+            loan_id: NonFungibleId
+        )
         {
             let loan_data = self.call_resource_mananger(&loan_id);
             let asset = loan_data.asset;
             let collateral = loan_data.collateral;
             let principal_loan_amount = loan_data.principal_loan_amount;
-            let interest_rate = loan_data.interest;
+            let interest_rate = loan_data.interest_rate;
             let owner = loan_data.owner;
             let remaining_balance = loan_data.remaining_balance;
             let interest_expense = loan_data.interest_expense;
@@ -1018,7 +1184,6 @@ blueprint! {
             info!("[Loan NFT]: Health Factor: {:?}", health_factor);
             info!("[Loan NFT]: Loan Status: {:?}", loan_status);
         }
-        
     }
 }
 

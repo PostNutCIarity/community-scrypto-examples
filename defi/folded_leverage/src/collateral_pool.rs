@@ -12,75 +12,42 @@ blueprint! {
     struct CollateralPool {
         // Vault for lending pool
         collateral_vaults: HashMap<ResourceAddress, Vault>,
-        // Badge for minting tracking tokens
-        tracking_token_admin_badge: Vault,
-        // Tracking tokens to be stored in borrowed_vaults whenever liquidity is removed from deposits
-        tracking_token_address: ResourceAddress,
-        // TBD
-        fees: Vault,
         user_management: ComponentAddress,
         access_vault: Vault,
-        lending_pool: Option<ComponentAddress>,
+        lending_pool: ComponentAddress,
     }
 
     impl CollateralPool {
-        pub fn new(user_component_address: ComponentAddress, initial_funds: Bucket, access_badge: Bucket) -> ComponentAddress {
+        pub fn new(
+            user_component_address: ComponentAddress,
+            lending_pool_address: ComponentAddress,
+            token_address: ResourceAddress,
+            access_badge: Bucket
+        ) -> ComponentAddress 
+        {
 
             let access_rules: AccessRules = AccessRules::new()
             .method("withdraw_vault", rule!(require(access_badge.resource_address())))
             .default(rule!(allow_all));
 
             assert_ne!(
-                borrow_resource_manager!(initial_funds.resource_address()).resource_type(), ResourceType::NonFungible,
+                borrow_resource_manager!(token_address).resource_type(), ResourceType::NonFungible,
                 "[Pool Creation]: Asset must be fungible."
             );
 
-            assert!(
-                !initial_funds.is_empty(), 
-                "[Pool Creation]: Can't deposit an empty bucket."
-            ); 
-
             let user_management_address: ComponentAddress = user_component_address;
-
-            // Define the resource address of the fees collected
-            let funds_resource_def = initial_funds.resource_address();
-
-            // Creating the admin badge of the liquidity pool which will be given the authority to mint and burn the
-            // tracking tokens issued to the liquidity providers.
-            let tracking_token_admin_badge: Bucket = ResourceBuilder::new_fungible()
-                .divisibility(DIVISIBILITY_NONE)
-                .metadata("name", "Tracking Token Admin Badge")
-                .metadata("symbol", "TTAB")
-                .metadata("description", "This is an admin badge that has the authority to mint and burn tracking tokens")
-                .metadata("lp_id", format!("{}", initial_funds.resource_address()))
-                .initial_supply(1);
-
-            // Creating the tracking tokens and minting the amount owed to the initial liquidity provider
-            let tracking_tokens: ResourceAddress = ResourceBuilder::new_fungible()
-                .divisibility(DIVISIBILITY_MAXIMUM)
-                .metadata("name", format!("Borrowed Tracking Token"))
-                .metadata("symbol", "TT")
-                .metadata("description", "A tracking token used to track the percentage ownership of liquidity providers over the liquidity pool")
-                .metadata("lp_id", format!("{}", initial_funds.resource_address()))
-                .mintable(rule!(require(tracking_token_admin_badge.resource_address())), LOCKED)
-                .burnable(rule!(require(tracking_token_admin_badge.resource_address())), LOCKED)
-                .no_initial_supply();
+            let lending_pool_address: ComponentAddress = lending_pool_address;
 
             //Inserting pool info into HashMap
-            let pool_resource_address = initial_funds.resource_address();
-            let lending_pool: Bucket = initial_funds;
             let mut collateral_vaults: HashMap<ResourceAddress, Vault> = HashMap::new();
-            collateral_vaults.insert(pool_resource_address, Vault::with_bucket(lending_pool));
+            collateral_vaults.insert(token_address, Vault::new(token_address));
 
             //Instantiate lending pool component
             let collateral_pool: ComponentAddress = Self {
                 collateral_vaults: collateral_vaults,
-                tracking_token_address: tracking_tokens,
-                tracking_token_admin_badge: Vault::with_bucket(tracking_token_admin_badge),
-                fees: Vault::new(funds_resource_def),
                 user_management: user_management_address,
                 access_vault: Vault::with_bucket(access_badge),
-                lending_pool: None,
+                lending_pool: lending_pool_address,
             }
             .instantiate()
             .add_access_check(access_rules)
@@ -96,13 +63,15 @@ blueprint! {
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
         }
 
-        pub fn set_address(&mut self, lending_pool_address: ComponentAddress) {
-            self.lending_pool.get_or_insert(lending_pool_address);
-        }
-
         // This method is also being used in the lending pool component as a convertion from deposit supply to collateral supply
         // Is it important to distinguish between regular supply and conversions?
-        pub fn deposit(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Bucket) {
+        pub fn deposit(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            deposit_amount: Bucket
+        ) 
+        {
             assert_eq!(token_address, deposit_amount.resource_address(), "Tokens must be the same.");
             
             let user_management: UserManagement = self.user_management.into();
@@ -115,12 +84,19 @@ blueprint! {
             self.collateral_vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
         }
 
-        pub fn deposit_additional(&mut self, user_id: NonFungibleId, loan_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Bucket) {
+        pub fn deposit_additional(
+            &mut self,
+            user_id: NonFungibleId,
+            loan_id: NonFungibleId,
+            token_address: ResourceAddress,
+            deposit_amount: Bucket
+        ) 
+        {
             assert_eq!(token_address, deposit_amount.resource_address(), "Tokens must be the same.");
             
             let user_management: UserManagement = self.user_management.into();
             
-            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+            let lending_pool: LendingPool = self.lending_pool.into();
 
             // Finds the loan NFT
             let loan_nft_resource = lending_pool.loan_nft();
@@ -137,8 +113,13 @@ blueprint! {
             self.collateral_vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
         }
 
-
-        pub fn convert_from_deposit(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, collateral_amount: Bucket) {
+        pub fn convert_from_deposit(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            collateral_amount: Bucket
+        ) 
+        {
             assert_eq!(token_address, collateral_amount.resource_address(), "Tokens must be the same.");
             
             let user_management: UserManagement = self.user_management.into();
@@ -155,14 +136,18 @@ blueprint! {
         /// # Returns:
         /// 
         /// `Vec<ResourceAddress>` - A vector of the resource addresses of the tokens in this liquidity pool.
-        pub fn addresses(&self) -> Vec<ResourceAddress> {
+        pub fn addresses(
+            &self
+        ) -> Vec<ResourceAddress> 
+        {
             return self.collateral_vaults.keys().cloned().collect::<Vec<ResourceAddress>>();
         }
 
         pub fn belongs_to_pool(
             &self, 
             address: ResourceAddress
-        ) -> bool {
+        ) -> bool
+        {
             return self.collateral_vaults.contains_key(&address);
         }
 
@@ -170,7 +155,8 @@ blueprint! {
             &self, 
             address: ResourceAddress, 
             label: String
-        ) {
+        ) 
+        {
             assert!(
                 self.belongs_to_pool(address), 
                 "[{}]: The provided resource address does not belong to the pool.", 
@@ -178,7 +164,12 @@ blueprint! {
             );
         }
 
-        fn withdraw(&mut self, resource_address: ResourceAddress, amount: Decimal) -> Bucket {
+        fn withdraw(
+            &mut self,
+            resource_address: ResourceAddress,
+            amount: Decimal
+        ) -> Bucket 
+        {
             // Performing the checks to ensure tha the withdraw can actually go through
             self.assert_belongs_to_pool(resource_address, String::from("Withdraw"));
             
@@ -193,8 +184,13 @@ blueprint! {
             return vault.take(amount);
         }
 
-        pub fn convert_to_deposit(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, deposit_amount: Decimal) {
-
+        pub fn convert_to_deposit(
+            &mut self, 
+            user_id: NonFungibleId, 
+            token_address: ResourceAddress, 
+            deposit_amount: Decimal
+        ) 
+        {
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management.into();
 
@@ -207,7 +203,7 @@ blueprint! {
             {
                 // Looping through loans in the User SBT
                 for (_token_address, loans) in user_loans {
-                    let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+                    let lending_pool: LendingPool = self.lending_pool.into();
                     let loan_resource = lending_pool.loan_nft();
                     let resource_manager = borrow_resource_manager!(loan_resource);
                     // Retrieve loan data for every loans in the User SBT
@@ -227,7 +223,7 @@ blueprint! {
             // Withdrawing the amount of tokens owed to this lender
             let addresses: Vec<ResourceAddress> = self.addresses();
             let bucket: Bucket = self.withdraw(addresses[0], deposit_amount);
-            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+            let lending_pool: LendingPool = self.lending_pool.into();
             lending_pool.convert_from_collateral(user_id, token_address, bucket);
         }
 
@@ -253,8 +249,13 @@ blueprint! {
         /// 
         /// * `Bucket` - A Bucket of the share of the liquidity provider of the first token.
         /// * `Bucket` - A Bucket of the share of the liquidity provider of the second token.
-        pub fn redeem(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, redeem_amount: Decimal) -> Bucket {
-
+        pub fn redeem(
+            &mut self, 
+            user_id: NonFungibleId, 
+            token_address: ResourceAddress, 
+            redeem_amount: Decimal
+        ) -> Bucket 
+        {
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management.into();
             let sbt_resource = user_management.get_nft();
@@ -262,7 +263,7 @@ blueprint! {
             let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
             let user_loans = sbt_data.open_loans.iter();
 
-            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+            let lending_pool: LendingPool = self.lending_pool.into();
             let loan_id = lending_pool.loan_nft();
 
             for (_token_address, loans) in user_loans {
@@ -281,23 +282,33 @@ blueprint! {
             return bucket;
         }
 
-        pub fn check_total_collateral_supplied(&self, token_address: ResourceAddress) -> Decimal {
+        pub fn check_total_collateral_supplied(
+            &self, 
+            token_address: ResourceAddress
+        ) -> Decimal 
+        {
             let vault = self.collateral_vaults.get(&token_address).unwrap();
             info!("The total collateral supplied in this pool is {:?}", vault.amount());
             return vault.amount()
         }
 
-        pub fn withdraw_vault(&mut self, amount: Decimal) -> Bucket
+        pub fn withdraw_vault(
+            &mut self, 
+            amount: Decimal
+        ) -> Bucket
         {
             let addresses: Vec<ResourceAddress> = self.addresses();
             let bucket: Bucket = self.withdraw(addresses[0], amount);
             return bucket
         }
 
-        pub fn liquidatev2(&mut self, loan_id: NonFungibleId)
+        pub fn liquidatev2(
+            &mut self, 
+            loan_id: NonFungibleId
+        )
         {
             // Retrieves lending pool component
-            let lending_pool: LendingPool = self.lending_pool.unwrap().into();
+            let lending_pool: LendingPool = self.lending_pool.into();
             // Retrieves loan NFT resource address
             let get_loan_resource = lending_pool.get_loan_resource();
             // Borrows resource manager to get NFT data

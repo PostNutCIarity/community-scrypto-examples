@@ -1,8 +1,10 @@
 resim call-function $package FoldedLeverage new
-resim call-method $comp new_user
-resim call-method $comp new_lending_pool "1,$proof" "$xrd" "1000,$xrd"
+resim call-method $comp new_user $acc
+resim call-method $comp new_lending_pool "1,$proof" "1000,$xrd"
+resim call-method $comp new_lending_pool "1,$proof" "1000,$usd"
 resim call-method $comp new_collateral_pool "1,$proof" "$xrd" "1000,$xrd"
 resim call-method $comp deposit_supply "1,$proof" "$xrd" "1000,$xrd"
+resim call-method $comp deposit_supply "1,$proof" "$usd" "1000,$usd"
 resim call-method $comp deposit_collateral 1,$proof $xrd 1000,$xrd
 resim call-method $comp convert_to_collateral 1,$proof $xrd 1000
 resim call-method $comp convert_to_deposit 1,$proof $xrd 1000
@@ -18,25 +20,30 @@ resim call-method $comp flash_repay "1,$proof" "$xrd" "1000,$xrd" "1,$flash" --m
 
 resim call-method $lending set_address $collateral
 resim call-method $collateral set_address $lending 
-resim call-method $comp set_address $xrd $lending $collateral $user
+resim call-method $comp set_address $xrd $lending $collateral $user $comp
 
 resim call-method $comp check_total_supplied $xrd
+resim call-method $comp check_total_supplied $usd
 resim call-method $comp check_total_collateral_supplied $xrd
 resim call-method $comp check_total_borrowed $xrd
+resim call-method $comp check_liquidity $xrd
+
+resim call-method $comp get_sbt_info 1,$proof
+resim call-method $comp get_loan_info $xrd $loan
 
 resim call-method $comp set_price 1,$proof $xrd 0.5
 resim call-method $comp find_bad_loans $xrd
 resim call-method $comp liquidate $loan $xrd 1000,$xrd
+resim call-method $comp credit_score_test 1,$proof 300
 
 $xrd="030000000000000000000000000000000000000000000000000004"
 
-/// Add access control to UserManagement
-/// Security for inc_paid_off?
-/// Does the total borrow include interest expense?
 /// If XRD price has been changed reflect on loan  
 
 /// finish liquidation
-/// think about credit worthiness and sliding collateralization
-/// Should interest rate change when you borrow additional?
-/// Work on borrow_additional design
-/// Prevent multiple SBTs
+/// Modify interest expense & collateralization based on credit score
+/// Credit score for collateral?
+/// Math for credit score can probably be abused
+/// Change health factor and liquidation price when paying off loan
+/// Change collateral amount of the loan NFT when liquidated
+/// Test the ownersh % model

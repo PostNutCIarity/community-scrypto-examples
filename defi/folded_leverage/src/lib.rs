@@ -4,3 +4,4 @@ mod user_management;
 mod collateral_pool;
 mod liquidation;
 mod structs;
+mod pseudopriceoracle;

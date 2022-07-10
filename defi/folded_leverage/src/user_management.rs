@@ -26,8 +26,10 @@ blueprint! {
     /// that are minted as a result of interacting with the pool (i.e to borrow). This is required to ensure there 
     /// are proper access controls to updating the User NFT. 
     impl UserManagement {
-        pub fn new(allowed: ResourceAddress) -> ComponentAddress {
-
+        pub fn new(
+            allowed: ResourceAddress
+        ) -> ComponentAddress
+        {
             let access_rules: AccessRules = AccessRules::new()
             .method("new_user", rule!(require(allowed)))
             .method("inc_credit_score", rule!(require(allowed)))
@@ -113,36 +115,59 @@ blueprint! {
             return user_nft
         }
 
-        fn call_resource_mananger(&self, user_id: &NonFungibleId) -> User {
+        fn call_resource_mananger(
+            &self,
+            user_id: &NonFungibleId
+        ) -> User
+        {
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let sbt: User = resource_manager.get_non_fungible_data(&user_id);
             return sbt
         }
 
-        fn authorize_update(&mut self, user_id: &NonFungibleId, sbt_data: User) {
+        fn authorize_update(
+            &mut self,
+            user_id: &NonFungibleId,
+            sbt_data: User
+        )
+        {
             let resource_manager = borrow_resource_manager!(self.nft_address);
             self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, sbt_data));
         }
 
         /// Currently simply a way for other components to get the resource address of the NFT
         /// so that it can take informationa bout the NFT itself.
-        pub fn get_nft(&self) -> ResourceAddress {
+        pub fn get_nft(
+            &self
+        ) -> ResourceAddress 
+        {
             return self.nft_address;
         }
         
         /// Takes in the NonFungibleId and reveals whether this NonFungibleId belongs to the protocol.
-        fn find_user(&self, user_id: &NonFungibleId) -> bool {
+        fn find_user(
+            &self,
+            user_id: &NonFungibleId
+        ) -> bool 
+        {
             return self.user_record.contains_key(&user_id)
         }
 
         /// Asserts that the user must belong to the is protocol.
-        fn assert_user_exist(&self, user_id: &NonFungibleId) {
+        fn assert_user_exist(
+            &self,
+            user_id: &NonFungibleId
+        ) 
+        {
             assert!(self.find_user(user_id), "User does not exist.");
         }        
 
         /// Need help on error regarding the unwrap 06/01/22
         /// Need to think about this more whether it needs to equal exactly zero
-        fn check_lien(&self, user_id: &NonFungibleId, token_requested: &ResourceAddress) 
+        fn check_lien(&self,
+            user_id: &NonFungibleId,
+            token_requested: &ResourceAddress
+        ) 
         {
             // Check if deposit withdrawal request has no lien
             let resource_manager = borrow_resource_manager!(self.nft_address);
@@ -150,7 +175,11 @@ blueprint! {
             return assert_eq!(nft_data.borrow_balance.get(&token_requested).unwrap_or(&Decimal::zero()), &Decimal::zero(), "User need to repay loan")
         }
 
-        pub fn inc_credit_score(&mut self, user_id: NonFungibleId, amount: u64)
+        pub fn inc_credit_score(
+            &mut self,
+            user_id: NonFungibleId,
+            amount: u64
+        )
         {
             // Calls the resource manager.
             let mut sbt_data = self.call_resource_mananger(&user_id);
@@ -162,7 +191,11 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        pub fn dec_credit_score(&mut self, user_id: NonFungibleId, amount: u64)
+        pub fn dec_credit_score(
+            &mut self,
+            user_id: NonFungibleId,
+            amount: u64
+        )
         {
             // Calls the resource manager.
             let mut sbt_data = self.call_resource_mananger(&user_id);
@@ -181,8 +214,13 @@ blueprint! {
         /// The transient resource address is then registered to this component where add_deposit_balance checks whether the transient resource token that has been passed
         /// Is the same as the transient resource that was created in the lending pool component
         /// The NFT data is then updated and the transient resource is burnt.
-        pub fn add_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
-
+        pub fn add_deposit_balance(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            amount: Decimal
+        ) 
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
@@ -201,8 +239,13 @@ blueprint! {
         }
 
         /// Check and understand the logic here - 06/01/2022
-        pub fn decrease_deposit_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal) {
-
+        pub fn decrease_deposit_balance(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            redeem_amount: Decimal
+        ) 
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
             
@@ -222,12 +265,22 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
         
-        pub fn deposit_resource_exists(&self, user_auth: Proof, address: ResourceAddress) -> bool {
+        pub fn deposit_resource_exists(
+            &self,
+            user_auth: Proof,
+            address: ResourceAddress
+        ) -> bool
+        {
             let user_badge_data: User = user_auth.non_fungible().data();
             return user_badge_data.deposit_balance.contains_key(&address);
         }
 
-        fn assert_deposit_resource_exists(&self, user_id: &NonFungibleId, address: &ResourceAddress) {
+        fn assert_deposit_resource_exists(
+            &self,
+            user_id: &NonFungibleId,
+            address: &ResourceAddress
+        ) 
+        {
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             return assert!(nft_data.deposit_balance.contains_key(&address), "This token resource does not exist in your deposit balance.")
@@ -263,8 +316,13 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `None` - The method simply updates the User NFT
-        pub fn increase_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
-
+        pub fn increase_borrow_balance(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            amount: Decimal
+        ) 
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
@@ -312,8 +370,13 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `Decimal` - The number of which is sent to the pool to show how much is owed to the borrower if the borrower overpaid to close out the loan.
-        pub fn decrease_borrow_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, repay_amount: Decimal, ) -> Decimal {
-
+        pub fn decrease_borrow_balance(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            repay_amount: Decimal
+        ) -> Decimal
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
@@ -341,8 +404,11 @@ blueprint! {
             };
         }
 
-        pub fn inc_paid_off(&mut self, user_id: NonFungibleId) {
-
+        pub fn inc_paid_off(
+            &mut self,
+            user_id: NonFungibleId
+        )
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
@@ -353,7 +419,11 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        pub fn inc_default(&mut self, user_id: NonFungibleId) {
+        pub fn inc_default(
+            &mut self,
+            user_id: NonFungibleId
+        ) 
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
@@ -390,8 +460,13 @@ blueprint! {
         /// # Returns:
         /// 
         /// * `None` - This method simply updates the User NFT.
-        pub fn insert_loan(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, loan_id: NonFungibleId) {
-
+        pub fn insert_loan(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            loan_id: NonFungibleId
+        ) 
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
@@ -406,8 +481,13 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        pub fn close_loan(&mut self, user_id: NonFungibleId, token_address: ResourceAddress, loan_id: NonFungibleId) {
-
+        pub fn close_loan(
+            &mut self,
+            user_id: NonFungibleId,
+            token_address: ResourceAddress,
+            loan_id: NonFungibleId
+        ) 
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
 
@@ -419,21 +499,35 @@ blueprint! {
         }
         
 
-        pub fn check_borrow_balance(&self, user_auth: Proof) { // This way or check_deposit_balance?
+        pub fn check_borrow_balance(
+            &self, 
+            user_auth: Proof
+        )
+        {
             let user_badge_data: User = user_auth.non_fungible().data();
             for (token, amount) in &user_badge_data.borrow_balance {
                 println!("{}: \"{}\"", token, amount)
             }
         }
 
-        fn assert_borrow_resource_exists(&self, user_id: &NonFungibleId, address: &ResourceAddress) {
+        fn assert_borrow_resource_exists(
+            &self, 
+            user_id: &NonFungibleId, 
+            address: &ResourceAddress
+        )
+        {
             let resource_manager = borrow_resource_manager!(self.nft_address);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             return assert!(nft_data.borrow_balance.contains_key(&address), "This token resource does not exist in your borrow balance.")
         }
 
-        pub fn convert_deposit_to_collateral(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
-
+        pub fn convert_deposit_to_collateral(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            amount: Decimal
+        )
+        {
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             // Converts the deposit to collateral balance by subtracting from deposit and adding to collateral balance.
             let mut sbt_data = self.call_resource_mananger(&user_id);
@@ -450,8 +544,13 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        pub fn convert_collateral_to_deposit(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
-
+        pub fn convert_collateral_to_deposit(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            amount: Decimal
+        ) 
+        {
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             // Converts the deposit to collateral balance by subtracting from deposit and adding to collateral balance.
             let mut sbt_data = self.call_resource_mananger(&user_id);
@@ -469,8 +568,12 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        pub fn add_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, amount: Decimal) {
-
+        pub fn add_collateral_balance(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            amount: Decimal)
+            {
             // If the User already has the resource address, adds to the balance. If not, registers new resource address.
             let mut sbt_data = self.call_resource_mananger(&user_id);
 
@@ -485,8 +588,13 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        pub fn decrease_collateral_balance(&mut self, user_id: NonFungibleId, address: ResourceAddress, redeem_amount: Decimal) -> Decimal {
-
+        pub fn decrease_collateral_balance(
+            &mut self,
+            user_id: NonFungibleId,
+            address: ResourceAddress,
+            redeem_amount: Decimal
+        ) -> Decimal
+        {
             // Asserts user exists
             self.assert_user_exist(&user_id);
             
@@ -517,7 +625,10 @@ blueprint! {
             };
         }
 
-        pub fn credit_score_modifier(&self, user_id: NonFungibleId) -> Decimal 
+        pub fn credit_score_modifier(
+            &self,
+            user_id: NonFungibleId
+        ) -> Decimal 
         {
             let sbt_data = self.call_resource_mananger(&user_id);
             let credit_score = sbt_data.credit_score;
@@ -532,14 +643,21 @@ blueprint! {
             }
         }
 
-        pub fn credit_score_test(&mut self, user_id: NonFungibleId, credit_score: u64)
+        pub fn credit_score_test(
+            &mut self,
+            user_id: NonFungibleId,
+            credit_score: u64
+        )
         {
             let mut sbt_data = self.call_resource_mananger(&user_id);
             sbt_data.credit_score += credit_score;
             self.authorize_update(&user_id, sbt_data);
         }
 
-        pub fn get_sbt_info(&self, user_id: NonFungibleId)
+        pub fn get_sbt_info(
+            &self,
+            user_id: NonFungibleId
+        )
         {
             let sbt_data = self.call_resource_mananger(&user_id);
             let credit_score = sbt_data.credit_score;
