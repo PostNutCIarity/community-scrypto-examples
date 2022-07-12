@@ -11,11 +11,12 @@ blueprint! {
 /// is then checked to ensure that the transient token was indeed minted from the pool.
     struct UserManagement {
         /// Vault that holds the authorization badge
-        user_badge_vault: Vault,
+        sbt_badge_vault: Vault,
         /// Collects User Address
-        nft_address: ResourceAddress,
+        sbt_address: ResourceAddress,
         /// This is the user record registry. It is meant to allow people to query the users that belongs to this protocol.
-        pub user_record: HashMap<NonFungibleId, User>,
+        user_record: HashMap<NonFungibleId, User>,
+        /// Keeps a record of wallet addresses to ensure that maps 1 SBT to 1 Wallet.
         account_record: Vec<ComponentAddress>,
     }
 
@@ -49,23 +50,23 @@ blueprint! {
             .default(rule!(allow_all));
 
             // Badge that will be stored in the component's vault to provide authorization to update the User NFT.
-            let lending_protocol_user_badge = ResourceBuilder::new_fungible()
+            let sbt_badge = ResourceBuilder::new_fungible()
                 .divisibility(DIVISIBILITY_NONE)
                 .metadata("user", "Lending Protocol User Badge")
                 .initial_supply(1);
 
             // NFT description for user identification. 
-            let nft_address = ResourceBuilder::new_non_fungible()
+            let sbt_data = ResourceBuilder::new_non_fungible()
                 .metadata("user", "Lending Protocol User")
-                .mintable(rule!(require(lending_protocol_user_badge.resource_address())), LOCKED)
-                .burnable(rule!(require(lending_protocol_user_badge.resource_address())), LOCKED)
+                .mintable(rule!(require(sbt_badge.resource_address())), LOCKED)
+                .burnable(rule!(require(sbt_badge.resource_address())), LOCKED)
                 .restrict_withdraw(rule!(deny_all), LOCKED)
-                .updateable_non_fungible_data(rule!(require(lending_protocol_user_badge.resource_address())), LOCKED)
+                .updateable_non_fungible_data(rule!(require(sbt_badge.resource_address())), LOCKED)
                 .no_initial_supply();
             
             return Self {
-                user_badge_vault: Vault::with_bucket(lending_protocol_user_badge),
-                nft_address: nft_address,
+                sbt_badge_vault: Vault::with_bucket(sbt_badge),
+                sbt_address: sbt_data,
                 user_record: HashMap::new(),
                 account_record: Vec::new(),
             }
@@ -84,8 +85,8 @@ blueprint! {
             assert_ne!(self.account_record.contains(&account_address), true, "SBT already created for this account.");
             
             // Mint NFT to give to users as identification 
-            let user_nft = self.user_badge_vault.authorize(|| {
-                let resource_manager: &ResourceManager = borrow_resource_manager!(self.nft_address);
+            let user_nft = self.sbt_badge_vault.authorize(|| {
+                let resource_manager: &ResourceManager = borrow_resource_manager!(self.sbt_address);
                 resource_manager.mint_non_fungible(
                     // The User id
                     &NonFungibleId::random(),
@@ -120,7 +121,7 @@ blueprint! {
             user_id: &NonFungibleId
         ) -> User
         {
-            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let resource_manager = borrow_resource_manager!(self.sbt_address);
             let sbt: User = resource_manager.get_non_fungible_data(&user_id);
             return sbt
         }
@@ -131,17 +132,17 @@ blueprint! {
             sbt_data: User
         )
         {
-            let resource_manager = borrow_resource_manager!(self.nft_address);
-            self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, sbt_data));
+            let resource_manager = borrow_resource_manager!(self.sbt_address);
+            self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, sbt_data));
         }
 
         /// Currently simply a way for other components to get the resource address of the NFT
         /// so that it can take informationa bout the NFT itself.
-        pub fn get_nft(
+        pub fn get_sbt(
             &self
         ) -> ResourceAddress 
         {
-            return self.nft_address;
+            return self.sbt_address;
         }
         
         /// Takes in the NonFungibleId and reveals whether this NonFungibleId belongs to the protocol.
@@ -162,15 +163,13 @@ blueprint! {
             assert!(self.find_user(user_id), "User does not exist.");
         }        
 
-        /// Need help on error regarding the unwrap 06/01/22
-        /// Need to think about this more whether it needs to equal exactly zero
         fn check_lien(&self,
             user_id: &NonFungibleId,
             token_requested: &ResourceAddress
         ) 
         {
             // Check if deposit withdrawal request has no lien
-            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let resource_manager = borrow_resource_manager!(self.sbt_address);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             return assert_eq!(nft_data.borrow_balance.get(&token_requested).unwrap_or(&Decimal::zero()), &Decimal::zero(), "User need to repay loan")
         }
@@ -281,7 +280,7 @@ blueprint! {
             address: &ResourceAddress
         ) 
         {
-            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let resource_manager = borrow_resource_manager!(self.sbt_address);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             return assert!(nft_data.deposit_balance.contains_key(&address), "This token resource does not exist in your deposit balance.")
         }
@@ -384,7 +383,7 @@ blueprint! {
             self.assert_borrow_resource_exists(&user_id, &address);
 
             // Retrieves resource manager to find user 
-            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let resource_manager = borrow_resource_manager!(self.sbt_address);
             let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
 
             // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
@@ -394,12 +393,12 @@ blueprint! {
                 let to_return = repay_amount - borrow_balance;
                 let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
                 *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) = Decimal::zero();
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
                 return to_return
             }
             else {
                 *nft_data.borrow_balance.get_mut(&address).unwrap() -= repay_amount;
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
                 return Decimal::zero()
             };
         }
@@ -516,7 +515,7 @@ blueprint! {
             address: &ResourceAddress
         )
         {
-            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let resource_manager = borrow_resource_manager!(self.sbt_address);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             return assert!(nft_data.borrow_balance.contains_key(&address), "This token resource does not exist in your borrow balance.")
         }
@@ -605,7 +604,7 @@ blueprint! {
             self.assert_deposit_resource_exists(&user_id, &address);
 
             // Retrieves resource manager to find user 
-            let resource_manager = borrow_resource_manager!(self.nft_address);
+            let resource_manager = borrow_resource_manager!(self.sbt_address);
             let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
 
             // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
@@ -615,12 +614,12 @@ blueprint! {
                 let to_return = redeem_amount - borrow_balance;
                 let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
                 *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) -= redeem_amount;
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
                 return to_return
             }
             else {
                 borrow_balance -= redeem_amount;
-                self.user_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
                 return Decimal::zero()
             };
         }

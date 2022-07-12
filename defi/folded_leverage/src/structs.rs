@@ -45,6 +45,8 @@ pub struct Loan {
     #[scrypto(mutable)]
     pub interest_expense: Decimal,
     #[scrypto(mutable)]
+    pub last_update: u64,
+    #[scrypto(mutable)]
     pub collateral_amount: Decimal,
     #[scrypto(mutable)]
     pub collateral_amount_usd: Decimal,
@@ -63,3 +65,14 @@ pub enum Status {
     Current,
 }
 
+#[derive(NonFungibleData, Debug)]
+pub struct FlashLoan {
+    pub amount_due: Decimal,
+    pub asset: ResourceAddress,
+    pub borrow_count: u8,
+}
+
+#[derive(NonFungibleData)]
+pub struct AccessBadge {
+    pub description: String,
+}

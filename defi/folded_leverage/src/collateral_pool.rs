@@ -3,11 +3,6 @@ use crate::user_management::*;
 use crate::lending_pool::*;
 use crate::structs::{User, Loan, Status};
 
-
-// Still need to figure out how to calculate fees and interest rate
-// Rational for NFT badge is to have a tracker and dashboard of loans, deposit, collateral, and user's risk profile.
-// Advantages of having LP token as a separation to NFT badge is that it can be use for something else. 
-
 blueprint! {
     struct CollateralPool {
         // Vault for lending pool
@@ -25,7 +20,6 @@ blueprint! {
             access_badge: Bucket
         ) -> ComponentAddress 
         {
-
             let access_rules: AccessRules = AccessRules::new()
             .method("withdraw_vault", rule!(require(access_badge.resource_address())))
             .default(rule!(allow_all));
@@ -53,14 +47,6 @@ blueprint! {
             .add_access_check(access_rules)
             .globalize();
             return collateral_pool
-        }
-
-        /// I want this method to be able to query the User NFT data to find the loan that has the same collateral....
-        fn user_belongs_to_pool(&self, user_id: &NonFungibleId) { 
-            let user_management: UserManagement = self.user_management.into();
-            let nft_resource = user_management.get_nft();
-            let resource_manager = borrow_resource_manager!(nft_resource);
-            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
         }
 
         // This method is also being used in the lending pool component as a convertion from deposit supply to collateral supply
@@ -195,7 +181,7 @@ blueprint! {
             let user_management: UserManagement = self.user_management.into();
 
             // Gets the user badge ResourceAddress
-            let nft_resource = user_management.get_nft();
+            let nft_resource = user_management.get_sbt();
             let resource_manager = borrow_resource_manager!(nft_resource);
             let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
             let user_loans = nft_data.open_loans.iter();
@@ -258,7 +244,7 @@ blueprint! {
         {
             // Check if the NFT belongs to this lending protocol.
             let user_management: UserManagement = self.user_management.into();
-            let sbt_resource = user_management.get_nft();
+            let sbt_resource = user_management.get_sbt();
             let resource_manager = borrow_resource_manager!(sbt_resource);
             let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
             let user_loans = sbt_data.open_loans.iter();
@@ -300,36 +286,6 @@ blueprint! {
             let addresses: Vec<ResourceAddress> = self.addresses();
             let bucket: Bucket = self.withdraw(addresses[0], amount);
             return bucket
-        }
-
-        pub fn liquidatev2(
-            &mut self, 
-            loan_id: NonFungibleId
-        )
-        {
-            // Retrieves lending pool component
-            let lending_pool: LendingPool = self.lending_pool.into();
-            // Retrieves loan NFT resource address
-            let get_loan_resource = lending_pool.get_loan_resource();
-            // Borrows resource manager to get NFT data
-            let resource_manager = borrow_resource_manager!(get_loan_resource);
-            // Retreieves loan NFT data
-            let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
-            // Asserts that the loan liquidation price is less than or equal to the current price of XRD
-            assert!(loan_data.liquidation_price <= lending_pool.retrieve_xrd_price(), "Can't liquidate this loan since the price of XRD is >= liquidation price");
-
-            // Retrieves collateral amount
-            let liquidation_amount = loan_data.collateral_amount;
-            // Retrieves resource address of the vault
-            let addresses: Vec<ResourceAddress> = self.addresses();
-            // Takes amount owed to lenders
-            let mut liquidated_bucket: Bucket = self.withdraw(addresses[0], liquidation_amount);
-            // Retrieves the owed amounts to lenders
-            let amount_owed_to_lender = loan_data.remaining_balance;
-            // Takes the owed amount to lenders
-            let return_owed: Bucket = liquidated_bucket.take(amount_owed_to_lender);
-            // Returns amount owed to lenders in the lending pool
-
         }
     }
 }

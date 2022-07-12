@@ -1,0 +1,30 @@
+# Flash loan borrow 3,000 XRD
+CALL_METHOD ComponentAddress("0229460c4bfc0cd0718ab3269d72985c851aa1986af72def403c90") "flash_borrow" ResourceAddress("030000000000000000000000000000000000000000000000000004") Decimal("3000");
+
+# Deposit 4,000 XRD as collateral (1,000 XRD from your own and 3,000 XRD from flash loan)
+CALL_METHOD ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "create_proof_by_amount" Decimal("1") ResourceAddress("0346621c485eda83cb67a2ac178e190db8d89218dc370e3552147a");
+POP_FROM_AUTH_ZONE Proof("proof1");
+CALL_METHOD ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "withdraw_by_amount" Decimal("4000") ResourceAddress("030000000000000000000000000000000000000000000000000004");
+# Taking collateral from account
+TAKE_FROM_WORKTOP_BY_AMOUNT Decimal("4000") ResourceAddress("030000000000000000000000000000000000000000000000000004") Bucket("bucket1");
+CALL_METHOD ComponentAddress("0229460c4bfc0cd0718ab3269d72985c851aa1986af72def403c90") "deposit_collateral" Proof("proof1") ResourceAddress("030000000000000000000000000000000000000000000000000004") Bucket("bucket1");
+
+
+# Borrow 3,000 USD
+CALL_METHOD ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "create_proof_by_amount" Decimal("1") ResourceAddress("0346621c485eda83cb67a2ac178e190db8d89218dc370e3552147a");
+POP_FROM_AUTH_ZONE Proof("proof2");
+CALL_METHOD ComponentAddress("0229460c4bfc0cd0718ab3269d72985c851aa1986af72def403c90") "borrow" Proof("proof2") ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e") ResourceAddress("030000000000000000000000000000000000000000000000000004") Decimal("3000");
+
+
+# Swap 3,000 USD for 3,000 XRD
+CALL_METHOD ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "withdraw_by_amount" Decimal("3000") ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e");
+TAKE_FROM_WORKTOP_BY_AMOUNT Decimal("3000") ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e") Bucket("bucket2");
+CALL_METHOD ComponentAddress("0229460c4bfc0cd0718ab3269d72985c851aa1986af72def403c90") "swap" Bucket("bucket2");
+
+
+# Pay back 3,000 XRD from the flash loan
+CALL_METHOD ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "withdraw_by_amount" Decimal("3000") ResourceAddress("030000000000000000000000000000000000000000000000000004");
+TAKE_FROM_WORKTOP_BY_AMOUNT Decimal("3000") ResourceAddress("030000000000000000000000000000000000000000000000000004") Bucket("bucket3");
+TAKE_FROM_WORKTOP_BY_AMOUNT Decimal("1") ResourceAddress("032eff4b0273a01de65409e8f380f71f95b1fe8a6617ae03e65dba") Bucket("bucket4");
+CALL_METHOD ComponentAddress("0229460c4bfc0cd0718ab3269d72985c851aa1986af72def403c90") "flash_repay" Bucket("bucket3") Bucket("bucket4");
+CALL_METHOD_WITH_ALL_RESOURCES ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "deposit_batch";
