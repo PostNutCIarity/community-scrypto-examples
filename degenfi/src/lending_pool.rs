@@ -22,7 +22,7 @@ blueprint! {
         // The component address of the Psuedo Price Oracle component.
         pseudopriceoracle_address: ComponentAddress,
         /// Access badge to call permissioned method from the UserManagement component.
-        access_token_vault: Vault,
+        access_badge_vault: Vault,
         /// The max amount a user can borrow of their collateral. In the future we can implement a sliding
         /// collaterization requirement or max borrow % based on credit worthiness.
         max_borrow: Decimal,
@@ -38,9 +38,8 @@ blueprint! {
         /// NFT loans are minted to create documentations of the loan that has been issued and repaid along with the loan terms.
         loans: BTreeSet<NonFungibleId>,
         /// Creates a list of Loan NFTs are bad so users can query and sort through.
-        bad_loans: BTreeSet<NonFungibleId>,
+        bad_loans: HashMap<NonFungibleId, ResourceAddress>,
         allowed_resource: Vec<ResourceAddress>,
-        collateral_type: HashMap<ResourceAddress, NonFungibleId>,
     }
 
     impl LendingPool {
@@ -117,7 +116,7 @@ blueprint! {
                 .metadata("description", "NFT that contains the loan terms")
                 .mintable(rule!(require(loan_issuer_badge.resource_address())), LOCKED)
                 .burnable(rule!(require(loan_issuer_badge.resource_address())), LOCKED)
-                .updateable_non_fungible_data(rule!(require(loan_issuer_badge.resource_address())), LOCKED)
+                .updateable_non_fungible_data(rule!(require(access_badge.resource_address())), LOCKED)
                 .no_initial_supply();
 
             // Inserting pool info into HashMap
@@ -137,7 +136,7 @@ blueprint! {
                 borrow_fees: dec!(".01"),
                 user_management_address: user_management_address,
                 pseudopriceoracle_address: pseudopriceoracle_address,
-                access_token_vault: Vault::with_bucket(access_badge),
+                access_badge_vault: Vault::with_bucket(access_badge),
                 max_borrow: dec!("0.75"),
                 min_health_factor: dec!("1.0"),
                 close_factor: dec!("0.5"),
@@ -146,9 +145,8 @@ blueprint! {
                 loan_issuer_badge: Vault::with_bucket(loan_issuer_badge),
                 loan_address: loan_nft_address,
                 loans: BTreeSet::new(),
-                bad_loans: BTreeSet::new(),
+                bad_loans: HashMap::new(),
                 allowed_resource: Vec::new(),
-                collateral_type: HashMap::new(),
             }
             .instantiate()
                         .add_access_check(access_rules)
@@ -236,7 +234,7 @@ blueprint! {
             let amount = deposit_amount.amount();
 
             // Authorizes to increase the deposit balance of the SBT user.
-            self.access_token_vault.authorize(|| {
+            self.access_badge_vault.authorize(|| {
                     user_management.add_deposit_balance(user_id.clone(), token_address, amount)
                 }
             );
@@ -245,6 +243,15 @@ blueprint! {
             self.supplied_amount += deposit_amount.amount();
 
             // Deposits collateral
+            self.vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
+        }
+
+        pub fn repayment_deposit(
+            &mut self,
+            deposit_amount: Bucket
+        )
+        {
+            // Deposits the loan repayment from liquidator.
             self.vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
         }
 
@@ -287,7 +294,7 @@ blueprint! {
 
             let amount = deposit_amount.amount();
 
-            self.access_token_vault.authorize(|| {
+            self.access_badge_vault.authorize(|| {
                 user_management.convert_collateral_to_deposit(user_id, token_address, amount)
                 }
             );
@@ -510,12 +517,12 @@ blueprint! {
             info!("[Loan NFT]: Interest Expense: {:?}", interest_expense);
 
             // Commits state
-            self.access_token_vault.authorize(|| {
+            self.access_badge_vault.authorize(|| {
                 user_management.increase_borrow_balance(user_id.clone(), token_address, borrow_amount)
                 }
             );
             // Insert loan NFT to the User NFT
-            self.access_token_vault.authorize(|| {
+            self.access_badge_vault.authorize(|| {
                 user_management.insert_loan(user_id.clone(), token_address, loan_nft_id.clone())
                 }
             );
@@ -635,7 +642,7 @@ blueprint! {
             assert!(loan_data.health_factor >= Decimal::one(), "Loan factor must be greater than one.");
 
             // Authorize to increase borrow balance of the user
-            self.access_token_vault.authorize(|| {
+            self.access_badge_vault.authorize(|| {
                 user_management.increase_borrow_balance(user_id, token_address, borrow_amount)
                 }
             );
@@ -756,7 +763,7 @@ blueprint! {
             // Creating a bucket to remove deposit supply from the lending pool to transfer to collateral pool
             let collateral_amount: Bucket = self.withdraw(addresses[0], deposit_collateral);
             let collateral_pool: CollateralPool = self.collateral_pool.unwrap().into();
-            self.access_token_vault.authorize(|| 
+            self.access_badge_vault.authorize(|| 
                 collateral_pool.convert_from_deposit(user_id, token_address, collateral_amount));
         }
 
@@ -810,7 +817,7 @@ blueprint! {
             }
             
             // Reduce deposit balance of the user.
-            self.access_token_vault.authorize(|| {
+            self.access_badge_vault.authorize(|| {
                 user_management.decrease_deposit_balance(user_id, token_address, redeem_amount)
                 }
             );
@@ -925,13 +932,13 @@ blueprint! {
                 loan_data.remaining_balance = Decimal::zero();
                 info!("[Lending Pool]: Your loan has been paid off!");
 
-                self.access_token_vault.authorize(|| {
+                self.access_badge_vault.authorize(|| {
                     user_management.inc_credit_score(user_id.clone(), credit_score)
                     }
                 );
 
                 // Authorize SBT data change
-                self.access_token_vault.authorize(|| {
+                self.access_badge_vault.authorize(|| {
                     user_management.inc_credit_score(user_id.clone(), credit_score)
                     }
                 );
@@ -939,12 +946,12 @@ blueprint! {
                 info!("[Lending Pool]: Credit Score increased by: {:?}", credit_score);
 
                 // Authorize SBT data change
-                self.access_token_vault.authorize(|| {
+                self.access_badge_vault.authorize(|| {
                     user_management.inc_paid_off(user_id.clone()) 
                     }
                 );
                 // Authorize SBT data change
-                self.access_token_vault.authorize(|| {
+                self.access_badge_vault.authorize(|| {
                     user_management.close_loan(user_id.clone(), token_address, loan_id.clone())
                     }
                 );
@@ -955,7 +962,7 @@ blueprint! {
             // Commits state
             self.authorize_update(&loan_id, loan_data);
 
-            let to_return_amount = self.access_token_vault.authorize(|| {
+            let to_return_amount = self.access_badge_vault.authorize(|| {
                 user_management.decrease_borrow_balance(user_id.clone(), token_address, amount)
                 }
             );
@@ -979,7 +986,7 @@ blueprint! {
         {
             self.find_bad_loans();
             // Check to  make sure that the loan can be liquidated
-            assert!(self.bad_loans().contains(&loan_id) == true, "This loan cannot be liquidated.");
+            assert!(self.bad_loans().contains_key(&loan_id) == true, "This loan cannot be liquidated.");
 
             assert_eq!(token_address, repay_amount.resource_address(), "Must pass the same resource.");
 
@@ -1004,7 +1011,7 @@ blueprint! {
             let collateral_pool: CollateralPool = self.collateral_pool.unwrap().into();
 
             // Take collateral owed to liquidator
-            let claim_liquidation: Bucket = self.access_token_vault.authorize(|| 
+            let claim_liquidation: Bucket = self.access_badge_vault.authorize(|| 
                 collateral_pool.withdraw_vault(amount_to_liquidator)
             );
             
@@ -1027,18 +1034,18 @@ blueprint! {
 
             // Update User State to record default amount
             let user_management: UserManagement = self.user_management_address.into();
-            self.access_token_vault.authorize(|| 
+            self.access_badge_vault.authorize(|| 
                 user_management.inc_default(user_id.clone())
             );
 
             let credit_score_decrease = 80;
             // Update User State to decrease credit score
-            self.access_token_vault.authorize(|| 
+            self.access_badge_vault.authorize(|| 
                 user_management.dec_credit_score(user_id.clone(), credit_score_decrease)
             );
 
             // Update user collateral balance
-            self.access_token_vault.authorize(|| 
+            self.access_badge_vault.authorize(|| 
                 user_management.decrease_collateral_balance(user_id.clone(), token_address, claim_liquidation.amount())
             );
 
@@ -1068,38 +1075,20 @@ blueprint! {
             for loans in check_loans {
                 let health_factor = self.check_health_factor(&loans);
                 if health_factor < self.min_health_factor {
-                    self.bad_loans.insert(loans.clone());
+                    self.bad_loans.insert(loans.clone(), self.loan_address);
                 }
             };
         }
 
         pub fn bad_loans(
             &mut self
-        ) -> BTreeSet<NonFungibleId> 
-        {
-            return self.bad_loans.clone();
-        }
-
-        pub fn find_collateral_type(
-            &mut self,
-        )
+        ) -> HashMap<NonFungibleId, ResourceAddress> 
         {
             self.insert_bad_loans();
             self.remove_closed_loans();
-            let bad_loans = self.bad_loans.iter();
-            for loans in bad_loans {
-                let loan_data = self.call_resource_mananger(loans);
-                let collateral_address = loan_data.collateral;
-                self.collateral_type.insert(collateral_address, loans.clone());
-            }
+            return self.bad_loans.clone();
         }
 
-        pub fn collateral_type(
-            &self,
-        ) -> HashMap<ResourceAddress, NonFungibleId>
-        {
-            return self.collateral_type.clone();
-        }
 
         /// Temporary method for now, might remove. Used by the liquidation component.
         pub fn get_loan_resource(
@@ -1145,7 +1134,7 @@ blueprint! {
             self.insert_bad_loans();
             self.remove_closed_loans();
             let bad_loans = self.bad_loans.iter();
-            for loans in bad_loans {
+            for (loans, _loan_resource_address) in bad_loans {
                 let resource_manager = borrow_resource_manager!(self.loan_address);
                 let loan_data: Loan = resource_manager.get_non_fungible_data(&loans);
                 let health_factor = loan_data.health_factor;
@@ -1174,7 +1163,7 @@ blueprint! {
         {
             let bad_loans = self.bad_loans.iter();
             let mut paid_loan: Vec<NonFungibleId> = Vec::new();
-            for loans in bad_loans {
+            for (loans, _loan_resource_address) in bad_loans {
                 let health_factor = self.check_health_factor(&loans);
                 let loan_data = self.call_resource_mananger(&loans);
                 let loan_status = loan_data.loan_status;
@@ -1290,7 +1279,7 @@ blueprint! {
             loan_id: &NonFungibleId,
             loan_data: Loan) {
             let resource_manager = borrow_resource_manager!(self.loan_address);
-            self.loan_issuer_badge.authorize(|| resource_manager.update_non_fungible_data(&loan_id, loan_data));
+            self.access_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&loan_id, loan_data));
         }
 
         /// Caclulates interest rate.

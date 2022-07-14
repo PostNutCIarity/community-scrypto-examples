@@ -47,7 +47,7 @@ resim call-method $COMPONENT swap 3000,$USD --manifest ./transactions/transactio
 resim call-method $COMPONENT flash_repay 3000,$XRD 1,$FLASH --manifest ./transactions/transaction5.rtm
 
 resim call-method $COMPONENT flash_borrow $USD 1500 --manifest ./transactions/liquidate1.rtm
-resim call-method $COMPONENT liquidate $LOAN $USD 1500,$USD --manifest ./transactions/liquidate2.rtm
+resim call-method $COMPONENT liquidate $LOAN 1500,$USD --manifest ./transactions/liquidate2.rtm
 resim call-method $COMPONENT swap 1841,$XRD --manifest ./transactions/liquidate3.rtm
 resim call-method $COMPONENT flash_repay 1500,$USD 1,$FLASH --manifest ./transactions/liquidate4.rtm
 
@@ -65,6 +65,9 @@ resim call-method $COMPONENT flash_repay 1500,$USD 1,$FLASH --manifest ./transac
 /// Design some logic regarding interest rate and interest collection - maybe just have all the fees batched into one
 /// Call to update bad loans when liquidating
 /// Set collateral address to the right lending pair?
+/// Reduce collateral amount from SBT when liquidated
+/// Reduce borrow balance?
+/// Credit score fucked up when liquidating
 
 ./resim-client.exe --address "pte01-socket.radixdlt.com:8010"
 
@@ -89,10 +92,7 @@ export FLASH=$(echo "$CP_OP" | sed -nr "s/.* Resource: ([[:alnum:]_]+)/\1/p" | s
 NU=$(resim run "./transactions/new_user.rtm")
 export PROOF=$(echo "$NU" | sed -nr "s/└─ [INFO ] User created! Your SBT resource address is ([[:alnum:]_]+)/\1/p")
 
-LP_USD=$(resim run "./transactions/create_usd_pool.rtm")
-export COLLATERALUSD=$(echo "$LP_USD" | sed -nr "s/.* Component: ([[:alnum:]_]+)/\1/p" | sed '2q;d')
-LP_XRD=$(resim run "./transactions/create_xrd_pool.rtm")
-export COLLATERALXRD=$(echo "$LP_XRD" | sed -nr "s/.* Component: ([[:alnum:]_]+)/\1/p" | sed '2q;d')
+
 
 
 resim call-function $PACKAGE DegenFi new --manifest ./transactions/component_creation.rtm
@@ -109,8 +109,103 @@ resim run ./transactions/create_usd_pool.rtm && resim run ./transactions/create_
 
 resim run ./transactions/deposit_supply_xrd.rtm && resim run ./transactions/deposit_supply_usd.rtm
 
-resim run ./transactions/deposit_supply_xrd.rtm && resim run ./transactions/deposit_supply_usd.rtm
+resim run ./transactions/instantiate_radiswap.rtm
+
+resim run ./transactions/degen.rtm
+
+resim run ./transactions/degen2.rtm
+
+resim run ./transactions/check_liquidity_usd.rtm
+
+resim run ./transactions/check_total_collateral_supplied_xrd.rtm
+
+resim show $ACC_ADDRESS1
+
+resim run ./transactions/get_loan_info_usd.rtm
+
+resim run ./transactions/get_sbt_info.rtm
 
 resim call-method $COMPONENT new_radiswap 30000,$XRD 20000,$USD 1000 lp lp l 0.01
 
-resim run ./transactions/instantiate_radiswap.rtm
+
+
+
+
+
+
+
+
+
+
+
+
+
+LP_USD=$(resim run "./transactions/create_usd_pool.rtm")
+export COLLATERALUSD=$(echo "$LP_USD" | sed -nr "s/.* Component: ([[:alnum:]_]+)/\1/p" | sed '2q;d')
+LP_XRD=$(resim run "./transactions/create_xrd_pool.rtm")
+export COLLATERALXRD=$(echo "$LP_XRD" | sed -nr "s/.* Component: ([[:alnum:]_]+)/\1/p" | sed '2q;d')
+
+
+
+$ resim run ./transactions/degen2.rtm
+Transaction Status: InvokeError
+Execution Time: 116 ms
+Instructions:
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "flash_borrow", args: [ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e"), Decimal("1500")] }
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "withdraw_by_amount", args: [Decimal("1500"), ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e")] }
+├─ TakeFromWorktopByAmount { amount: 1500, resource_address: 03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e }
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "liquidate", args: [NonFungibleId("f649c7108731305e56c6ccb2323fea4a"), ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e"), Bucket(512u32)] }
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "withdraw_by_amount", args: [Decimal("1841"), ResourceAddress("030000000000000000000000000000000000000000000000000004")] }
+├─ TakeFromWorktopByAmount { amount: 1841, resource_address: 030000000000000000000000000000000000000000000000000004 }
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "swap", args: [Bucket(513u32)] }
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "withdraw_by_amount", args: [Decimal("1500"), ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e")] }
+├─ TakeFromWorktopByAmount { amount: 1500, resource_address: 03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e }
+├─ TakeFromWorktopByAmount { amount: 1, resource_address: 031bdcbe3baf05ddb3958a732198951fb61321cbb34a52849305c1 }
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "flash_repay", args: [Bucket(514u32), Bucket(515u32)] }
+└─ CallMethodWithAllResources { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "deposit_batch" }
+Instruction Outputs:
+├─ Tuple(Bucket(1025u32), Bucket(1029u32), Bucket(1031u32)) Flash borrow
+├─ Bucket(1032u32) Liquidate
+└─ Bucket(512u32)
+Logs: 1
+└─ [ERROR] Panicked at 'called `Result::unwrap()` on an `Err` value: InvalidType { expected: Some(177), actual: 182 }', src\degenfi.rs:9:1
+New Entities: 0
+Error: TransactionExecutionError(InvokeError)
+
+
+Instructions:
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "flash_borrow", args: [ResourceAddress("030000000000000000000000000000000000000000000000000004"), Decimal("3000")] }
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "create_proof_by_amount", args: [Decimal("1"), ResourceAddress("031877b80351308d72910bebd7b8185f65925b9e6f97819c946886")] }
+├─ PopFromAuthZone
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "withdraw_by_amount", args: [Decimal("4000"), ResourceAddress("030000000000000000000000000000000000000000000000000004")] }
+├─ TakeFromWorktopByAmount { amount: 4000, resource_address: 030000000000000000000000000000000000000000000000000004 }
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "deposit_collateral", args: [Proof(512u32), Bucket(513u32)] }
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "create_proof_by_amount", args: [Decimal("1"), ResourceAddress("031877b80351308d72910bebd7b8185f65925b9e6f97819c946886")] }
+├─ PopFromAuthZone
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "borrow", args: [Proof(514u32), ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e"), ResourceAddress("030000000000000000000000000000000000000000000000000004"), Decimal("3000")] }
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "withdraw_by_amount", args: [Decimal("3000"), ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e")] }
+├─ TakeFromWorktopByAmount { amount: 3000, resource_address: 03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e }
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "swap", args: [Bucket(515u32)] }
+├─ CallMethod { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "withdraw_by_amount", args: [Decimal("3000"), ResourceAddress("030000000000000000000000000000000000000000000000000004")] }
+├─ TakeFromWorktopByAmount { amount: 3000, resource_address: 030000000000000000000000000000000000000000000000000004 }
+├─ TakeFromWorktopByAmount { amount: 1, resource_address: 031bdcbe3baf05ddb3958a732198951fb61321cbb34a52849305c1 }
+├─ CallMethod { component_address: 028cd52a660096a871ff2022b9ac216c2c94382ada23020e13e8fa, method: "flash_repay", args: [Bucket(516u32), Bucket(517u32)] }
+└─ CallMethodWithAllResources { component_address: 020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a, method: "deposit_batch" }
+Instruction Outputs:
+├─ Tuple(Bucket(1025u32), Bucket(1029u32), Bucket(1031u32))
+├─ Proof(1032u32)
+├─ Proof(512u32)
+├─ Bucket(1034u32)
+├─ Bucket(513u32)
+├─ Bucket(1040u32)
+├─ Proof(1041u32)
+├─ Proof(514u32)
+├─ Tuple(Bucket(1056u32), Bucket(1046u32), Bucket(1058u32))
+├─ Bucket(1059u32)
+├─ Bucket(515u32)
+├─ Bucket(1061u32)
+├─ Bucket(1062u32)
+├─ Bucket(516u32)
+├─ Bucket(517u32)
+├─ Bucket(1069u32)
+└─ ()

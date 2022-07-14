@@ -10,6 +10,7 @@ blueprint! {
         user_management: ComponentAddress,
         access_badge_vault: Vault,
         lending_pool: ComponentAddress,
+        close_factor: Decimal,
     }
 
     impl CollateralPool {
@@ -25,6 +26,7 @@ blueprint! {
             .method("convert_to_deposit", rule!(require(access_badge.resource_address())))
             .method("redeem", rule!(require(access_badge.resource_address())))
             .method("withdraw_vault", rule!(require(access_badge.resource_address())))
+            .method("liquidate", rule!(require(access_badge.resource_address())))
             .default(rule!(allow_all));
 
             assert_ne!(
@@ -45,6 +47,7 @@ blueprint! {
                 user_management: user_management_address,
                 access_badge_vault: Vault::with_bucket(access_badge),
                 lending_pool: lending_pool_address,
+                close_factor: dec!("0.5"),
             }
             .instantiate()
             .add_access_check(access_rules)
@@ -272,6 +275,93 @@ blueprint! {
             return bucket;
         }
 
+        pub fn liquidate(
+            &mut self,
+            loan_id: NonFungibleId,
+            loan_resource_address: ResourceAddress,
+            collateral_address: ResourceAddress,
+            lending_pool: LendingPool,
+            repay_amount: Bucket
+        ) -> Bucket 
+        {
+
+            // Retrieve resource manager.
+            let resource_manager = borrow_resource_manager!(loan_resource_address);
+            // Retrieves loan NFT data.
+            let mut loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
+
+            // Retrieve asset address.
+            let repayment_address = loan_data.asset;
+
+            // Asserts that the resource passed in must be the same as the collateral address. 
+            assert_eq!(repayment_address, repay_amount.resource_address(), "Must pass the same resource.");
+
+            // Retrieves health factor of the loan.
+            let health_factor = loan_data.health_factor;
+
+            let max_repay: Decimal = if health_factor >= self.close_factor {
+                dec!("0.5")
+            } else {
+                dec!("1.0")
+            };
+
+            // Calculate amount returned
+            assert!(repay_amount.amount() <= loan_data.remaining_balance * max_repay, "Max repay amount exceeded.");
+
+            // Calculate owed to liquidator (amount paid + liquidation bonus fee of 5%)
+            let amount_to_liquidator = repay_amount.amount() + (repay_amount.amount() * dec!("0.05"));
+
+            let addresses: Vec<ResourceAddress> = self.addresses();
+            let claim_liquidation: Bucket = self.withdraw(addresses[0], amount_to_liquidator);
+            
+            // Update loan
+            loan_data.collateral_amount -= claim_liquidation.amount();
+            loan_data.remaining_balance -= repay_amount.amount();
+            //let new_collateral_amount = loan_data.collateral_amount;
+            //let remaining_balance = loan_data.remaining_balance;
+            //let health_factor = ( ( new_collateral_amount * self.xrd_usd ) * dec!("0.8") ) / remaining_balance;
+            //loan_data.health_factor = health_factor;
+            loan_data.loan_status = Status::Defaulted;
+
+            self.access_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&loan_id, loan_data));
+
+            // Retrieve resource manager
+            let loan_data: Loan = resource_manager.get_non_fungible_data(&loan_id);
+            
+            // Retrieve owner of the loan
+            let user_id = loan_data.owner;
+
+            // Update User State to record default amount
+            let user_management: UserManagement = self.user_management.into();
+            self.access_badge_vault.authorize(|| 
+                user_management.inc_default(user_id.clone())
+            );
+
+            self.access_badge_vault.authorize(|| 
+                user_management.decrease_borrow_balance(user_id.clone(), repayment_address, repay_amount.amount())
+            );
+
+            self.access_badge_vault.authorize(|| 
+                user_management.decrease_collateral_balance(user_id.clone(), collateral_address, amount_to_liquidator)
+            );
+
+            let credit_score_decrease = 80;
+            // Update User State to decrease credit score
+            self.access_badge_vault.authorize(|| 
+                user_management.dec_credit_score(user_id.clone(), credit_score_decrease)
+            );
+
+            // Update user collateral balance
+            self.access_badge_vault.authorize(|| 
+                user_management.decrease_collateral_balance(user_id.clone(), collateral_address, claim_liquidation.amount())
+            );
+
+            // Sends the repay amount to the lending pool
+            lending_pool.repayment_deposit(repay_amount);
+
+            return claim_liquidation
+        }
+
         pub fn check_total_collateral_supplied(
             &self, 
             token_address: ResourceAddress
@@ -293,5 +383,4 @@ blueprint! {
         }
     }
 }
-
 

@@ -4,7 +4,7 @@ use crate::radiswap::*;
 use crate::collateral_pool::*;
 use crate::user_management::*;
 use crate::pseudopriceoracle::*;
-use crate::structs::{User, FlashLoan};
+use crate::structs::{User, FlashLoan, Loan};
 
 blueprint! {
     /// This is the main component for this protocol. It can be considered as a router, taken inspiration from Omar's "RaDEX"
@@ -13,6 +13,7 @@ blueprint! {
     struct DegenFi {
         // Contains all the lending pool addresses
         lending_pools: HashMap<ResourceAddress, LendingPool>,
+        lending_pool_address: HashMap<ResourceAddress, ComponentAddress>,
         // Contains all the collateral pool addresses
         collateral_pools: HashMap<ResourceAddress, CollateralPool>,
         collateral_pool_address: HashMap<ResourceAddress, ComponentAddress>,
@@ -40,7 +41,7 @@ blueprint! {
         flash_loan_auth_vault: Vault,
         // Flash loan resource address
         flash_loan_address: ResourceAddress,
-        bad_loans: HashMap<ResourceAddress, NonFungibleId>,
+        bad_loans: HashMap<NonFungibleId, ResourceAddress>,
     }
 
     impl DegenFi {
@@ -109,6 +110,7 @@ blueprint! {
 
             return Self {
                 lending_pools: HashMap::new(),
+                lending_pool_address: HashMap::new(),
                 collateral_pools: HashMap::new(),
                 collateral_pool_address: HashMap::new(),
                 user_management_address: UserManagement::new(access_badge.resource_address()),
@@ -479,6 +481,11 @@ blueprint! {
             self.lending_pools.insert(
                 token_address,
                 lending_pool.into()
+            );
+
+            self.lending_pool_address.insert(
+                token_address,
+                lending_pool
             );
 
             self.collateral_pool_address.insert(
@@ -914,7 +921,8 @@ blueprint! {
                         lending_pool.flash_borrow(amount));
                     // Mints the transient token
                     let transient_token = self.flash_loan_auth_vault.authorize(|| {
-                        borrow_resource_manager!(self.flash_loan_address).mint_non_fungible(
+                        borrow_resource_manager!(self.flash_loan_address)
+                        .mint_non_fungible(
                             &NonFungibleId::random(),
                             FlashLoan {
                                 amount_due: amount,
@@ -1151,24 +1159,62 @@ blueprint! {
         pub fn liquidate(
             &mut self,
             loan_id: NonFungibleId,
-            token_address: ResourceAddress,
             repay_amount: Bucket
-        ) -> Bucket
-        {
+        ) -> (Bucket, Bucket)
+        {  
+            // Runs methods to update the bad loans data structure.
+            self.insert_bad_loans();
+            // Asserts that the loan exist in the bad loans data structure.
+            assert_eq!(self.bad_loans.contains_key(&loan_id), true, "This is not a bad loan.");
+            // Retrieves loan resource address.
+            let loan_resource_address = self.bad_loans.get(&loan_id).unwrap();
+            // Retrieves the collateral address of the loan NFT.
+            let collateral_address = self.get_loan_collateral(&loan_id);
+            let repayment_address = self.get_loan_asset(&loan_id);
+            // Attempts to find the correct collateral pool.
             let optional_collateral_pool: Option<&CollateralPool> = self.collateral_pools.get(&collateral_address);
             match optional_collateral_pool {
                 Some (collateral_pool) => { // If it matches it means that the lending pool exists.
-                    self.access_badge_vault.authorize(|| 
-                        collateral_pool.liquidate(loan_id, token_address, repay_amount));
+                    let lending_pool_address: ComponentAddress = *self.lending_pool_address.get(&repayment_address).unwrap();
+                    let lending_pool: LendingPool = lending_pool_address.into();
+                    let claim_liquidation: Bucket = self.access_badge_vault.authorize(|| 
+                        collateral_pool.liquidate(loan_id, *loan_resource_address, collateral_address, lending_pool, repay_amount));
                     let degen_token = self.degen_token_vault.take(1);
-                    degen_token
+                    (claim_liquidation, degen_token)
                 }
                 None => { 
-                    info!("[DegenFi]: Pool for {:?} doesn't exist.", token_address);
+                    info!("[DegenFi]: Pool for {:?} doesn't exist.", collateral_address);
                     let empty_bucket1: Bucket = self.access_auth_vault.take(0);
-                    empty_bucket1
+                    let empty_bucket2: Bucket = self.access_auth_vault.take(0);
+                    (empty_bucket1, empty_bucket2)
                 }
             }
+        }
+
+        fn get_loan_collateral(
+            &self,
+            loan_id: &NonFungibleId
+        ) -> ResourceAddress
+        {
+            let loan_resource_address = self.bad_loans.get(loan_id).unwrap();
+            let resource_manager = borrow_resource_manager!(*loan_resource_address);
+            let loan_data: Loan = resource_manager.get_non_fungible_data(loan_id);
+            let collateral_address = loan_data.collateral;
+
+            collateral_address
+        }
+
+        fn get_loan_asset(
+            &self,
+            loan_id: &NonFungibleId
+        ) -> ResourceAddress
+        {
+            let loan_resource_address = self.bad_loans.get(loan_id).unwrap();
+            let resource_manager = borrow_resource_manager!(*loan_resource_address);
+            let loan_data: Loan = resource_manager.get_non_fungible_data(loan_id);
+            let asset_address = loan_data.asset;
+
+            asset_address
         }
 
         
@@ -1206,7 +1252,7 @@ blueprint! {
             }
         }
 
-        pub fn insert_bad_loans_public(
+        pub fn insert_bad_loans(
             &mut self,
         )
         {
@@ -1215,9 +1261,9 @@ blueprint! {
                 let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_address);
                 match optional_lending_pool {
                     Some (lending_pool) => { 
-                        let bad_pool_loans = lending_pool.collateral_type();
-                        for (collateral_address, loans) in bad_pool_loans {
-                            self.bad_loans.insert(collateral_address, loans);
+                        let bad_pool_loans = lending_pool.bad_loans();
+                        for (loans, loan_resource_address) in bad_pool_loans {
+                            self.bad_loans.insert(loans, loan_resource_address);
                         }
                     }
                     None => { 
@@ -1229,9 +1275,10 @@ blueprint! {
         }
 
         pub fn bad_loans(
-            &self
-        ) -> HashMap<ResourceAddress, NonFungibleId>
+            &mut self
+        ) -> HashMap<NonFungibleId, ResourceAddress>
         {
+            self.insert_bad_loans();
             return self.bad_loans.clone()
         }
 
