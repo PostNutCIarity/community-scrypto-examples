@@ -1,0 +1,2 @@
+cargo:rustc-env=TYPENUM_BUILD_CONSTS=G:\My Drive\GitHub\degenfi\target\wasm32-unknown-unknown\release\build\typenum-d92613e0a1fe716e\out\consts.rs
+cargo:rustc-env=TYPENUM_BUILD_OP=G:\My Drive\GitHub\degenfi\target\wasm32-unknown-unknown\release\build\typenum-d92613e0a1fe716e\out\op.rs
