@@ -1017,7 +1017,7 @@ blueprint! {
         pub fn redeem_collateral(
             &mut self,
             user_auth: Proof,
-            token_requested: ResourceAddress,
+            collateral_address: ResourceAddress,
             amount: Decimal,
         ) -> Bucket
         {
@@ -1027,16 +1027,16 @@ blueprint! {
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
-            let optional_collateral_pool: Option<&CollateralPool> = self.collateral_pools.get(&token_requested);
+            let optional_collateral_pool: Option<&CollateralPool> = self.collateral_pools.get(&collateral_address);
             match optional_collateral_pool {
                 Some (collateral_pool) => { // If it matches it means that the lending pool exists. 
-                    info!("[DegenFi]: Redeeming {:?} of {:?}", amount, token_requested); 
+                    info!("[DegenFi]: Redeeming {:?} of {:?}", amount, collateral_address); 
                     let return_bucket: Bucket = self.access_badge_vault.authorize(|| 
-                        collateral_pool.redeem(user_id, token_requested, amount));
+                        collateral_pool.redeem(user_id, collateral_address, amount));
                     return_bucket
                 }
                 None => { 
-                    info!("[DegenFi]: Pool for {:?} doesn't exist.", token_requested);
+                    info!("[DegenFi]: Pool for {:?} doesn't exist.", collateral_address);
                     let empty_bucket: Bucket = self.access_auth_vault.take(0);
                     empty_bucket
                 }
@@ -1170,6 +1170,7 @@ blueprint! {
             let loan_resource_address = self.bad_loans.get(&loan_id).unwrap();
             // Retrieves the collateral address of the loan NFT.
             let collateral_address = self.get_loan_collateral(&loan_id);
+            // Retrieve the resource address of the repayment.
             let repayment_address = self.get_loan_asset(&loan_id);
             // Attempts to find the correct collateral pool.
             let optional_collateral_pool: Option<&CollateralPool> = self.collateral_pools.get(&collateral_address);

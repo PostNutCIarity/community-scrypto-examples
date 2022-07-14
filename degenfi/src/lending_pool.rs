@@ -518,7 +518,7 @@ blueprint! {
 
             // Commits state
             self.access_badge_vault.authorize(|| {
-                user_management.increase_borrow_balance(user_id.clone(), token_address, borrow_amount)
+                user_management.increase_borrow_balance(user_id.clone(), token_address, remaining_amount)
                 }
             );
             // Insert loan NFT to the User NFT

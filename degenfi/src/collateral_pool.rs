@@ -245,7 +245,7 @@ blueprint! {
         pub fn redeem(
             &mut self, 
             user_id: NonFungibleId, 
-            token_address: ResourceAddress, 
+            collateral_address: ResourceAddress, 
             redeem_amount: Decimal
         ) -> Bucket 
         {
@@ -254,20 +254,23 @@ blueprint! {
             let sbt_resource = user_management.get_sbt();
             let resource_manager = borrow_resource_manager!(sbt_resource);
             let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
-            let user_loans = sbt_data.open_loans.iter();
+            let user_loans = sbt_data.open_loans.keys();
 
             let lending_pool: LendingPool = self.lending_pool.into();
-            let loan_id = lending_pool.loan_nft();
+            let loan_resource_address = lending_pool.loan_nft();
 
-            for (_token_address, loans) in user_loans {
-                let resource_manager = borrow_resource_manager!(loan_id);
-                let loan_data: Loan = resource_manager.get_non_fungible_data(&loans);
-                let check_paid_off = loan_data.loan_status;
-                assert!(check_paid_off != Status::Current, "Must pay off loans before redeeming.");
+            for address in user_loans {
+                let loans = sbt_data.open_loans.get(address).unwrap();
+                let resource_manager = borrow_resource_manager!(loan_resource_address);
+                let loan_data: Loan = resource_manager.get_non_fungible_data(loans);
+                let loan_collateral_address = loan_data.collateral;
+                assert_eq!(loan_collateral_address, collateral_address, "Collateral address in the loan are not the same.");
+                let loan_status = loan_data.loan_status;
+                assert_ne!(loan_status, Status::Current, "Must pay off loans before redeeming.");
             }
 
             // Reduce deposit balance of the user
-            self.access_badge_vault.authorize(|| {user_management.decrease_deposit_balance(user_id, token_address, redeem_amount)});
+            self.access_badge_vault.authorize(|| {user_management.decrease_collateral_balance(user_id, collateral_address, redeem_amount)});
 
             // Withdrawing the amount of tokens owed to this lender
             let addresses: Vec<ResourceAddress> = self.addresses();
