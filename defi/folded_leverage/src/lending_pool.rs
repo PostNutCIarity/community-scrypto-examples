@@ -2,7 +2,7 @@ use scrypto::prelude::*;
 use crate::user_management::*;
 use crate::pseudopriceoracle::*;
 use crate::collateral_pool::*;
-use crate::structs::{User, Loan, Status, FlashLoan};
+use crate::structs::{User, Loan, Status};
 
 blueprint! {
     /// This is a struct used to define the Lending Pool.
@@ -11,10 +11,6 @@ blueprint! {
         /// vaults in a hashmap instead of storing them in two different struct variables is made to allow for an easier
         /// and more dynamic way of manipulating and making use of the vaults inside the liquidity pool. 
         vaults: HashMap<ResourceAddress, Vault>,
-        //Flash loan admin badge
-        flash_loan_auth_vault: Vault,
-        // Flash loan resource address
-        flash_loan_address: ResourceAddress,
         supplied_amount: Decimal,
         borrow_amount: Decimal,
         origination_fees_collected: Decimal,
@@ -81,6 +77,17 @@ blueprint! {
             access_badge: Bucket
         ) -> ComponentAddress 
         {
+
+            let access_rules: AccessRules = AccessRules::new()
+            .method("convert_from_collateral", rule!(require(access_badge.resource_address())))
+            .method("borrow", rule!(require(access_badge.resource_address())))
+            .method("borrow_additional", rule!(require(access_badge.resource_address())))
+            .method("convert_to_collateral", rule!(require(access_badge.resource_address())))
+            .method("redeem", rule!(require(access_badge.resource_address())))
+            .method("flash_borrow", rule!(require(access_badge.resource_address())))
+            .method("flash_repay", rule!(require(access_badge.resource_address())))
+            .default(rule!(allow_all));
+
             assert_ne!(
                 borrow_resource_manager!(initial_funds.resource_address()).resource_type(), ResourceType::NonFungible,
                 "[Pool Creation]: Asset must be fungible."
@@ -112,26 +119,6 @@ blueprint! {
                 .updateable_non_fungible_data(rule!(require(loan_issuer_badge.resource_address())), LOCKED)
                 .no_initial_supply();
 
-            // Creates badge to authorizie to mint/burn flash loan
-            let flash_loan_token = ResourceBuilder::new_fungible()
-                .divisibility(DIVISIBILITY_NONE)
-                .metadata("name", "Admin authority for BasicFlashLoan")
-                .metadata("symbol", "FLT")
-                .metadata("description", "Admin authority to mint/burn flash loan tokens")
-                .initial_supply(1);
-
-            // Define a "transient" resource which can never be deposited once created, only burned
-            let flash_loan_address = ResourceBuilder::new_non_fungible()
-                .metadata(
-                    "name",
-                    "Promise token for BasicFlashLoan - must be returned to be burned!",
-                )
-                .mintable(rule!(require(flash_loan_token.resource_address())), LOCKED)
-                .burnable(rule!(require(flash_loan_token.resource_address())), LOCKED)
-                .updateable_non_fungible_data(rule!(require(flash_loan_token.resource_address())), LOCKED)
-                .restrict_deposit(rule!(deny_all), LOCKED)
-                .no_initial_supply();
-
             // Inserting pool info into HashMap
             let pool_resource_address = initial_funds.resource_address();
             let initial_funds_amount = initial_funds.amount(); 
@@ -142,8 +129,6 @@ blueprint! {
             // Instantiate lending pool component
             let lending_pool: ComponentAddress = Self {
                 vaults: vaults,
-                flash_loan_auth_vault: Vault::with_bucket(flash_loan_token),
-                flash_loan_address: flash_loan_address,
                 supplied_amount: initial_funds_amount,
                 borrow_amount: Decimal::zero(),
                 origination_fees_collected: Decimal::zero(),
@@ -164,6 +149,7 @@ blueprint! {
                 allowed_resource: Vec::new(),
             }
             .instantiate()
+                        .add_access_check(access_rules)
             .globalize();
             return lending_pool;
         }
@@ -467,7 +453,7 @@ blueprint! {
 
             let interest_rate = self.interest_calc();
 
-            let modifier = user_management.credit_score_modifier(user_id.clone());
+            let modifier = user_management.interest_modifier(user_id.clone());
 
             let modified_interest_rate = interest_rate - modifier;
 
@@ -492,6 +478,7 @@ blueprint! {
                         collateral: collateral_address,
                         principal_loan_amount: borrow_amount,
                         interest_rate: modified_interest_rate,
+                        origination_fee: fee_charged,
                         owner: user_id.clone(),
                         remaining_balance: remaining_amount,
                         interest_expense: interest_expense,
@@ -620,7 +607,7 @@ blueprint! {
             let interest_rate = self.interest_calc();
 
             // Calculate modifier based on user credit score
-            let modifier = user_management.credit_score_modifier(user_id.clone());
+            let modifier = user_management.interest_modifier(user_id.clone());
 
             let modified_interest_rate = interest_rate - modifier;
 
@@ -678,25 +665,13 @@ blueprint! {
         /// * `Bucket` - Returns the transient token the must be burnt.
         pub fn flash_borrow(
             &mut self,
-            token_requested: ResourceAddress,
             amount: Decimal
-        ) -> (Bucket, Bucket)
+        ) -> Bucket
         {
-            // Mints the transient token
-            let transient_token = self.flash_loan_auth_vault.authorize(|| {
-                borrow_resource_manager!(self.flash_loan_address).mint_non_fungible(
-                    &NonFungibleId::random(),
-                    FlashLoan {
-                        amount_due: amount,
-                        asset: token_requested,
-                        borrow_count: 1,
-                    },
-                )
-            });
             let addresses: Vec<ResourceAddress> = self.addresses();
             // Withdraws the amount requested to borrow
             let return_borrow_amount: Bucket = self.withdraw(addresses[0], amount);
-            return (return_borrow_amount, transient_token);
+            return return_borrow_amount;
         }
 
         /// Allows user to repay the flash loan borrow.
@@ -725,27 +700,9 @@ blueprint! {
         pub fn flash_repay(
             &mut self,
             repay_amount: Bucket,
-            flash_loan: Bucket,
         )
         {
-            let flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
-            // Can there be a way in which flash loans are partially repaid?
-            assert!(repay_amount.amount() >= flash_loan_data.amount_due, "Insufficient repayment given for your loan!");
-
-            // Checks if flash loan bucket is empty
-            assert_ne!(flash_loan.is_empty(), true, "Cannot be empty.");
-
-            // Checks flash loan token belongs to this protocol
-            assert_eq!(flash_loan.resource_address(), self.flash_loan_address, "Flash loan token must belong to this pool");
-
-            let flash_loan_data = flash_loan.non_fungible::<FlashLoan>().data();
-
-            let flash_borrow_resource_address = flash_loan_data.asset;
-            
-            assert_eq!(repay_amount.resource_address(), flash_borrow_resource_address, "The incorrect asset passed.");
-
             self.vaults.get_mut(&repay_amount.resource_address()).unwrap().put(repay_amount);
-            self.flash_loan_auth_vault.authorize(|| flash_loan.burn());
         }
 
         /// Converts the user's supply deposit to collateral.
@@ -797,7 +754,8 @@ blueprint! {
             // Creating a bucket to remove deposit supply from the lending pool to transfer to collateral pool
             let collateral_amount: Bucket = self.withdraw(addresses[0], deposit_collateral);
             let collateral_pool: CollateralPool = self.collateral_pool.unwrap().into();
-            collateral_pool.convert_from_deposit(user_id, token_address, collateral_amount);
+            self.access_token_vault.authorize(|| 
+                collateral_pool.convert_from_deposit(user_id, token_address, collateral_amount));
         }
 
         /// Removes the percentage of the liquidity owed to this liquidity provider.
@@ -831,13 +789,17 @@ blueprint! {
             redeem_amount: Decimal
         ) -> Bucket 
         {
-            // Check if the NFT belongs to this lending protocol.
+            // Retrieves the User Management component.
             let user_management: UserManagement = self.user_management_address.into();
+            // Retrieves the SBT resource address.
             let sbt_resource = user_management.get_sbt();
+            // Retrieves the resource manager.
             let resource_manager = borrow_resource_manager!(sbt_resource);
+            // Retrieves SBT data.
             let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+            // Creates an iterator for the open loan HashMap.
             let user_loans = sbt_data.open_loans.iter();
-
+            // Iterators through open loans to view whether there are open loans.
             for (_token_address, loans) in user_loans {
                 let resource_manager = borrow_resource_manager!(self.loan_address);
                 let loan_data: Loan = resource_manager.get_non_fungible_data(&loans);
@@ -845,16 +807,16 @@ blueprint! {
                 assert!(check_paid_off != Status::Current, "Must pay off loans before redeeming.");
             }
             
-            // Reduce deposit balance of the user
+            // Reduce deposit balance of the user.
             self.access_token_vault.authorize(|| {
                 user_management.decrease_deposit_balance(user_id, token_address, redeem_amount)
                 }
             );
 
-            // Calculate & of the pool to be removed
+            // Calculate & of the pool to be removed.
             let vault: &mut Vault = self.vaults.get_mut(&token_address).unwrap();
             let redeem_amount = redeem_amount * ( vault.amount() / self.supplied_amount );
-            // Withdrawing the amount of tokens owed to this lender
+            // Withdrawing the amount of tokens owed to this lender.
             let addresses: Vec<ResourceAddress> = self.addresses();
             let bucket: Bucket = self.withdraw(addresses[0], redeem_amount);
 
@@ -863,7 +825,6 @@ blueprint! {
         
         /// Repays the loan in partial or in full.
         /// 
-        /// # Description:
         /// This method is used to calculate the amount of tokens owed to the liquidity provider and take them out of
         /// the lending pool and return them to the liquidity provider.
         /// 
@@ -894,23 +855,25 @@ blueprint! {
             mut repay_amount: Bucket
         ) -> Bucket 
         {
+            // Retrieves the loans in the component state.
             let loans = &self.loans;
-            
+            // Asserts that the loan exists.
             assert!(loans.contains(&loan_id) == true, "Requested loan repayment does not exist.");
-
+            // Retrieves the User Management component.
             let user_management: UserManagement = self.user_management_address.into();
+            // Converts to decimal amount.
             let amount = repay_amount.amount();
 
-            // Update Loan NFT
-            // Borrow resource manager
+            // Update Loan NFT.
+            // Borrow resource manager.
             let mut loan_data = self.call_resource_mananger(&loan_id);
 
             // Asserts that the loan isn't already paid off
             assert_ne!(loan_data.loan_status, Status::PaidOff, "The loan has already been paid off!");
 
-            // Retrieve remaining loan balance
+            // Retrieve remaining loan balance.
             let remaining_balance = loan_data.remaining_balance;
-
+            // Calculates whether the amount sent is too much.
             let overpaid = amount - remaining_balance;
 
             // Assert overpayment. Much easier to not allow users to overpay than to calculte return of overpayment
@@ -920,22 +883,40 @@ blueprint! {
                 remaining_balance
             );
 
-            // Update remaining balance (includes interest expense)
+            // Update remaining balance (includes interest expense and origination fee)
             loan_data.remaining_balance -= amount;
 
             // Takes interest expense amount
-            let interest_expense = loan_data.interest_expense;
-
+            let interest_expense = loan_data.interest_expense; 
+            // Takes origination fee
+            let origination_fee = loan_data.origination_fee;
+            
+            // Design some logic regarding interest rate and interest collection
             self.interest_fees_collected += interest_expense;
+            self.borrow_fees += origination_fee;
 
             // Takes separates interest expense from principal loan amount
-            let actual_repay_amount = repay_amount.amount() - interest_expense;
+            let principal_repay_amount = repay_amount.amount() - interest_expense - origination_fee;
 
             // Decrease borrow counter (excludes interest expense)
-            self.borrow_amount -= actual_repay_amount;
+            self.borrow_amount -= principal_repay_amount;
+            // Retrieves the principal loan amount.
+            let principal_loan_amount = loan_data.principal_loan_amount;
+            // Calculates how much has been paid off relative to the principal amount.
+            let remaining_paid_off = remaining_balance / principal_loan_amount;
 
-            let credit_score = 20;
-
+            let credit_score = if remaining_paid_off <= dec!("0.75") {
+                20
+            } else if remaining_paid_off <= dec!("0.75") {
+                25
+            } else if remaining_paid_off <= dec!("0.50") {
+                30
+            } else if remaining_paid_off <= dec!("0.25") {
+                35
+            } else if remaining_paid_off <= dec!("0.0") {
+                40
+            } else {0};
+            
             if loan_data.remaining_balance <= Decimal::zero() {
                 // Change loan status to paid off
                 loan_data.loan_status = Status::PaidOff;
@@ -994,8 +975,11 @@ blueprint! {
             repay_amount: Bucket
         ) -> Bucket 
         {
+            self.find_bad_loans();
             // Check to  make sure that the loan can be liquidated
             assert!(self.bad_loans().contains(&loan_id) == true, "This loan cannot be liquidated.");
+
+            assert_eq!(token_address, repay_amount.resource_address(), "Must pass the same resource.");
 
             // Retrieve resource manager
             let mut loan_data = self.call_resource_mananger(&loan_id);
@@ -1115,7 +1099,21 @@ blueprint! {
             return boolean;
         }
 
-        /// Returns a string of bad loans from bad_loans.
+        /// Allows user to find loans that are below Health Factor of 1
+        ///
+        /// This method is used to display any loans that have a Health Factor of 1.
+        /// It emits a message displaying the loan NFT ID and its Health Factor. In the future
+        /// There will be more information that will be displayed.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// This method does not request any arguments to be passed.
+        /// 
+        /// # Returns:
+        /// 
+        /// This method does not return any assets.
         pub fn find_bad_loans(
             &mut self
         ) 
@@ -1133,6 +1131,20 @@ blueprint! {
             };
         }
                         
+        /// Removes loans that do not belong.
+        ///
+        /// This method is used to remove any loans that do not belong in the bad loans data field.
+        /// Any loans that are above a Health Factor of 1 or paid off loans do not belong here.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// This method does not request any arguments to be passed.
+        /// 
+        /// # Returns:
+        /// 
+        /// Returns a temporary Vec of the NonFungibleId that do not belong in this data field.
         pub fn clean_bad_loans(
             &self
         ) -> Vec<NonFungibleId>
@@ -1153,6 +1165,19 @@ blueprint! {
             paid_loan
         }
 
+        /// Removes loans that do not belong.
+        ///
+        /// This function is a helper function that removes the loans that don't belong here.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// This method does not request any arguments to be passed.
+        /// 
+        /// # Returns:
+        /// 
+        /// This method does not return any assets.
         fn remove_closed_loans(
             &mut self
         ) 
@@ -1165,7 +1190,20 @@ blueprint! {
             }
         }
 
-        pub fn default_loan(
+        /// Applies a default status on the loan.
+        ///
+        /// This methdod is used to apply default status on loans that have been fully liquidated.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// This method does not request any arguments to be passed.
+        /// 
+        /// # Returns:
+        /// 
+        /// This method does not return any assets.
+        fn default_loan(
             &mut self,
             loan_id: NonFungibleId
         ) 
@@ -1187,6 +1225,19 @@ blueprint! {
             }
         }
         
+        /// Borrows the resource manager.
+        ///
+        /// This is a helper function to borrow the resource manager.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// `loan_id` (&NonFungibleId) - A reference to the loan NFT's NonFungibleId.
+        /// 
+        /// # Returns:
+        /// 
+        /// `Loan` - The Loan struct.
         fn call_resource_mananger(
             &self,
             loan_id: &NonFungibleId
@@ -1197,6 +1248,20 @@ blueprint! {
             return loan_data
         }
 
+        /// Authorizes data update for the loan NFT.
+        ///
+        /// This is a helper function to authorize data update for the loan NFT.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// `loan_id` (&NonFungibleId) - A reference to the loan NFT's NonFungibleId.
+        /// `loan_data` (Loan) - The Loan struct.
+        /// 
+        /// # Returns:
+        /// 
+        /// This method does not return any assets.
         fn authorize_update(
             &mut self,
             loan_id: &NonFungibleId,
@@ -1205,6 +1270,22 @@ blueprint! {
             self.loan_issuer_badge.authorize(|| resource_manager.update_non_fungible_data(&loan_id, loan_data));
         }
 
+        /// Caclulates interest rate.
+        ///
+        /// This is a method used to calculate the interest rate applied to the loan. It's
+        /// a simple calculation for now for demonstration purposes. The basic idea is that the more
+        /// demand there are to borrow from the pool (utilization rate) the higher the interest rate
+        /// will be.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// This method does not require any arguments to be passed through.
+        /// 
+        /// # Returns:
+        /// 
+        /// `Decimal` - The interest rate returned.
         pub fn interest_calc(
             &mut self
         ) -> Decimal 
@@ -1226,6 +1307,19 @@ blueprint! {
             return interest
         }
 
+        /// Checks the Health Factor of the loan.
+        ///
+        /// This helper function is used to check the Health Factor of the loan. 
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// `loan_id` (&NonFungibleId) - A reference to the loan NFT's NonFungibleId.
+        /// 
+        /// # Returns:
+        /// 
+        /// `Decimal` - The Health Factor of the loan.
         fn check_health_factor(
             &self,
             loan_id: &NonFungibleId

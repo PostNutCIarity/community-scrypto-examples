@@ -4,7 +4,7 @@ use crate::radiswap::*;
 use crate::collateral_pool::*;
 use crate::user_management::*;
 use crate::pseudopriceoracle::*;
-use crate::structs::{User};
+use crate::structs::{User, FlashLoan};
 
 blueprint! {
     /// This is the main component for this protocol. It can be considered as a router, taken inspiration from Omar's "RaDEX"
@@ -15,6 +15,7 @@ blueprint! {
         lending_pools: HashMap<ResourceAddress, LendingPool>,
         // Contains all the collateral pool addresses
         collateral_pools: HashMap<ResourceAddress, CollateralPool>,
+        collateral_pool_address: HashMap<ResourceAddress, ComponentAddress>,
         // User Management component address
         user_management_address: ComponentAddress,
         // Price oracle component address
@@ -24,23 +25,50 @@ blueprint! {
         // Access Admin Badge used to mint/burn Access Tokens
         access_auth_vault: Vault,
         // Access Tokens are used to be able to make permissioned calls between Blueprints
-        access_token_vault: Vault,
+        access_badge_vault: Vault,
         // The resource address of the Access Token
-        access_token_address: ResourceAddress,
+        access_badge_address: ResourceAddress,
         // Admin badge to mint/burn Degen Tokens
         degen_auth_vault: Vault,
         // Resource address of Degen Tokens
         degen_token_address: ResourceAddress,
         // Contains the initial supply of Degen Tokens
         degen_token_vault: Vault,
+        // Resource address of the SBT
+        sbt_address: Vec<ResourceAddress>,
+        //Flash loan admin badge
+        flash_loan_auth_vault: Vault,
+        // Flash loan resource address
+        flash_loan_address: ResourceAddress,
     }
 
     impl DegenFi {
         pub fn new(
         ) -> ComponentAddress 
         {
+            
+            // Creates badge to authorizie to mint/burn flash loan
+            let flash_loan_token = ResourceBuilder::new_fungible()
+                .divisibility(DIVISIBILITY_NONE)
+                .metadata("name", "Admin authority for BasicFlashLoan")
+                .metadata("symbol", "FLT")
+                .metadata("description", "Admin authority to mint/burn flash loan tokens")
+                .initial_supply(1);
+
+            // Define a "transient" resource which can never be deposited once created, only burned
+            let flash_loan_address = ResourceBuilder::new_non_fungible()
+                .metadata(
+                    "name",
+                    "Promise token for BasicFlashLoan - must be returned to be burned!",
+                )
+                .mintable(rule!(require(flash_loan_token.resource_address())), LOCKED)
+                .burnable(rule!(require(flash_loan_token.resource_address())), LOCKED)
+                .updateable_non_fungible_data(rule!(require(flash_loan_token.resource_address())), LOCKED)
+                .restrict_deposit(rule!(deny_all), LOCKED)
+                .no_initial_supply();
+
             // Creates badge to mint/burn access tokens
-            let access_badge = ResourceBuilder::new_fungible()
+            let access_admin = ResourceBuilder::new_fungible()
                 .divisibility(DIVISIBILITY_NONE)
                 .metadata("name", "Access Admin Badge")
                 .metadata("symbol", "AB")
@@ -48,17 +76,17 @@ blueprint! {
                 .initial_supply(1);   
 
             // Creates badge to allow permissioned method calls between Blueprints    
-            let access_token = ResourceBuilder::new_fungible()
+            let access_badge = ResourceBuilder::new_fungible()
                 .metadata("name", "Access Token")
                 .metadata("symbol", "AT")
                 .metadata("description", 
                 "Access Tokens are used to be able to make permissioned calls between Blueprints")
-                .mintable(rule!(require(access_badge.resource_address())), LOCKED)
-                .burnable(rule!(require(access_badge.resource_address())), LOCKED)
+                .mintable(rule!(require(access_admin.resource_address())), LOCKED)
+                .burnable(rule!(require(access_admin.resource_address())), LOCKED)
                 .initial_supply(1);
 
             // Retrieves resource address of the Access Token to register as Access Rule
-            let access_token_address = access_token.resource_address();
+            let access_badge_address = access_badge.resource_address();
 
             // Creates admin badge to authorize minting/burning of Degen Tokens
             let degen_badge = ResourceBuilder::new_fungible()
@@ -78,20 +106,22 @@ blueprint! {
                 .burnable(rule!(require(degen_badge.resource_address())), LOCKED)
                 .initial_supply(1000);
 
-            
-            // Difference between using return Self and just Self?
             return Self {
                 lending_pools: HashMap::new(),
                 collateral_pools: HashMap::new(),
-                user_management_address: UserManagement::new(access_token.resource_address()),
+                collateral_pool_address: HashMap::new(),
+                user_management_address: UserManagement::new(access_badge.resource_address()),
                 pseudopriceoracle_address: PseudoPriceOracle::new(),
                 radiswap_address: None,
-                access_auth_vault: Vault::with_bucket(access_badge),
-                access_token_vault: Vault::with_bucket(access_token),
-                access_token_address: access_token_address,
+                access_auth_vault: Vault::with_bucket(access_admin),
+                access_badge_vault: Vault::with_bucket(access_badge),
+                access_badge_address: access_badge_address,
                 degen_auth_vault: Vault::with_bucket(degen_badge),
                 degen_token_address: degen_token.resource_address(),
                 degen_token_vault: Vault::with_bucket(degen_token),
+                sbt_address: Vec::new(),
+                flash_loan_auth_vault: Vault::with_bucket(flash_loan_token),
+                flash_loan_address: flash_loan_address,
             }
             .instantiate()
             .globalize();
@@ -125,7 +155,7 @@ blueprint! {
             // Retrieves User Management component.
             let user_management: UserManagement = self.user_management_address.into();
             // Makes authorized method call to create a new user for the protocol.
-            let new_user: Bucket = self.access_token_vault.authorize(|| 
+            let new_user: Bucket = self.access_badge_vault.authorize(|| 
                 user_management.new_user(account_address)
             );
             // User receives 1 Degen Token for creating a user
@@ -134,6 +164,8 @@ blueprint! {
             info!("User created! Your SBT resource address is {:?}", new_user.resource_address());
             info!(
                 "Thank you for registering an account at DegenFi, here are {:?} Degen Tokens for you to start!", degen_token.amount());
+            // Registers the resource address the SBT   
+            self.sbt_address.push(new_user.resource_address());
 
             (new_user, degen_token)
         }
@@ -155,11 +187,11 @@ blueprint! {
         pub fn set_address(
             &mut self,
             lendingpool_address: ResourceAddress,
-            collateral_pool_address: ComponentAddress,
         ) 
         {
             let lending_pool: &LendingPool = self.lending_pools.get(&lendingpool_address).unwrap();
-            lending_pool.set_address(collateral_pool_address);
+            let collateral_pool_address = self.collateral_pool_address.get(&lendingpool_address).unwrap();
+            lending_pool.set_address(*collateral_pool_address);
         }
 
         /// Gets the NonFungibleId of the SBT.
@@ -405,6 +437,9 @@ blueprint! {
             deposit_amount: Bucket
         ) -> Bucket
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Retrieves the User Management component.
             let user_management = self.user_management_address.into();
             // Retrieves the Pseudo Price Oracle component.
@@ -424,8 +459,8 @@ blueprint! {
             let amount = deposit_amount.amount();
 
             // Mints an access badge for the lending pool and collateral pool.
-            let access_badge_token = self.access_auth_vault.authorize(|| borrow_resource_manager!(self.access_token_address).mint(Decimal::one()));
-            let access_badge_token2 = self.access_auth_vault.authorize(|| borrow_resource_manager!(self.access_token_address).mint(Decimal::one()));
+            let access_badge_token = self.access_auth_vault.authorize(|| borrow_resource_manager!(self.access_badge_address).mint(Decimal::one()));
+            let access_badge_token2 = self.access_auth_vault.authorize(|| borrow_resource_manager!(self.access_badge_address).mint(Decimal::one()));
             
             // Instantiates the lending pool and collateral pool.
             let lending_pool: ComponentAddress = LendingPool::new(user_management, pseudopriceoracle, deposit_amount, access_badge_token);
@@ -434,7 +469,7 @@ blueprint! {
             // Retrieves User Management Component
             let user_management: UserManagement = self.user_management_address.into();
             // Authorizes balance update
-            self.access_token_vault.authorize(||
+            self.access_badge_vault.authorize(||
                 user_management.add_deposit_balance(user_id.clone(), token_address, amount)
             );
 
@@ -442,6 +477,11 @@ blueprint! {
             self.lending_pools.insert(
                 token_address,
                 lending_pool.into()
+            );
+
+            self.collateral_pool_address.insert(
+                token_address,
+                collateral_pool
             );
 
             // Inserts into collateral pool hashmap.
@@ -487,6 +527,8 @@ blueprint! {
             deposit_amount: Bucket
         ) -> Bucket
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
             // Retrieve resource address of the deposit
             let token_address: ResourceAddress = deposit_amount.resource_address(); 
             // Checks if the user exists
@@ -539,6 +581,8 @@ blueprint! {
             amount: Bucket
         ) -> Bucket
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
             // Retrieves token address of the amount sent
             let token_address: ResourceAddress = amount.resource_address(); 
             // Checks if the user exists
@@ -592,6 +636,9 @@ blueprint! {
             amount: Bucket
         ) -> Bucket
         { 
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists.
             let user_id = self.get_user(&user_auth);
 
@@ -648,6 +695,9 @@ blueprint! {
             amount: Decimal
         )
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
@@ -656,7 +706,8 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the lending pool exists.
                     info!("[DegenFi]: Converting {:?} of {:?} to collateral supply.", amount, token_requested);
-                    lending_pool.convert_to_collateral(user_id, token_requested, amount);
+                    self.access_badge_vault.authorize(|| 
+                        lending_pool.convert_to_collateral(user_id, token_requested, amount));
                 }
                 None => { 
                     info!("[DegenFi]: Pool for {:?} doesn't exist.", token_requested);
@@ -694,6 +745,9 @@ blueprint! {
             amount: Decimal
         )
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
@@ -702,7 +756,8 @@ blueprint! {
             match optional_collateral_pool {
                 Some (collateral_pool) => { // If it matches it means that the lending pool exists.
                     info!("[DegenFi]: Converting {:?} of {:?} to deposit supply", amount, token_requested);
-                    collateral_pool.convert_to_deposit(user_id, token_requested, amount);
+                    self.access_badge_vault.authorize(|| 
+                        collateral_pool.convert_to_deposit(user_id, token_requested, amount));
                 }
                 None => {
                     info!("[DegenFi]: Pool for {:?} doesn't exist.", token_requested);
@@ -742,6 +797,9 @@ blueprint! {
             amount: Decimal
         ) -> (Bucket, Bucket, Bucket)
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists.
             let user_id = self.get_user(&user_auth);
 
@@ -750,7 +808,8 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the lending pool exists.
                     info!("[DegenFi]: Borrowing: {:?}, Amount: {:?}", token_requested, amount);
-                    let (return_borrow, loan_nft): (Bucket, Bucket) = lending_pool.borrow(user_id, token_requested, collateral_address, amount);
+                    let (return_borrow, loan_nft): (Bucket, Bucket) = self.access_badge_vault.authorize(||
+                        lending_pool.borrow(user_id, token_requested, collateral_address, amount));
                     let degen_token = self.degen_token_vault.take(1);
                     (return_borrow, loan_nft, degen_token)
                 }
@@ -793,6 +852,9 @@ blueprint! {
             amount: Decimal
         ) -> (Bucket, Bucket)
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
@@ -801,7 +863,8 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the lending pool exists.
                     info!("[DegenFi]: Borrowing: {:?}, Amount: {:?}", token_requested, amount);
-                    let return_borrow: Bucket = lending_pool.borrow_additional(user_id, loan_id, token_requested, amount);
+                    let return_borrow: Bucket = self.access_badge_vault.authorize(||
+                        lending_pool.borrow_additional(user_id, loan_id, token_requested, amount));
                     let degen_token = self.degen_token_vault.take(1);
                     (return_borrow, degen_token)
                 }
@@ -845,7 +908,19 @@ blueprint! {
             let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_requested);
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the lending pool exists.
-                    let (return_borrow, transient_token): (Bucket, Bucket) = lending_pool.flash_borrow(token_requested, amount);
+                    let return_borrow: Bucket = self.access_badge_vault.authorize(||
+                        lending_pool.flash_borrow(amount));
+                    // Mints the transient token
+                    let transient_token = self.flash_loan_auth_vault.authorize(|| {
+                        borrow_resource_manager!(self.flash_loan_address).mint_non_fungible(
+                            &NonFungibleId::random(),
+                            FlashLoan {
+                                amount_due: amount,
+                                asset: token_requested,
+                                borrow_count: 1,
+                            },
+                        )
+                    });
                     let degen_token = self.degen_token_vault.take(1);
                     (return_borrow, transient_token, degen_token)
                 }
@@ -887,6 +962,9 @@ blueprint! {
             amount: Decimal
         ) -> Bucket 
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
@@ -894,7 +972,8 @@ blueprint! {
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the lending pool exists. 
                     info!("[DegenFi]: Redeeming {:?} of {:?}", amount, token_requested); 
-                    let return_bucket: Bucket = lending_pool.redeem(user_id, token_requested, amount);
+                    let return_bucket: Bucket = self.access_badge_vault.authorize(|| 
+                        lending_pool.redeem(user_id, token_requested, amount));
                     return_bucket
                 }
                 None => { 
@@ -932,6 +1011,9 @@ blueprint! {
             amount: Decimal,
         ) -> Bucket
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
@@ -939,7 +1021,8 @@ blueprint! {
             match optional_collateral_pool {
                 Some (collateral_pool) => { // If it matches it means that the lending pool exists. 
                     info!("[DegenFi]: Redeeming {:?} of {:?}", amount, token_requested); 
-                    let return_bucket: Bucket = collateral_pool.redeem(user_id, token_requested, amount);
+                    let return_bucket: Bucket = self.access_badge_vault.authorize(|| 
+                        collateral_pool.redeem(user_id, token_requested, amount));
                     return_bucket
                 }
                 None => { 
@@ -979,6 +1062,9 @@ blueprint! {
             amount: Bucket
         ) -> (Bucket, Bucket) 
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             // Checks if the user exists
             let user_id = self.get_user(&user_auth);
 
@@ -1027,15 +1113,56 @@ blueprint! {
             flash_loan: Bucket
         ) -> Bucket 
         {
+            let flash_loan_data: FlashLoan = flash_loan.non_fungible().data();
+            // Can there be a way in which flash loans are partially repaid?
+            assert!(repay_amount.amount() >= flash_loan_data.amount_due, "Insufficient repayment given for your loan!");
+
+            // Checks if flash loan bucket is empty
+            assert_ne!(flash_loan.is_empty(), true, "Cannot be empty.");
+
+            // Checks flash loan token belongs to this protocol
+            assert_eq!(flash_loan.resource_address(), self.flash_loan_address, "Flash loan token must belong to this pool");
+
+            let flash_loan_data = flash_loan.non_fungible::<FlashLoan>().data();
+
+            let flash_borrow_resource_address = flash_loan_data.asset;
+            
+            assert_eq!(repay_amount.resource_address(), flash_borrow_resource_address, "The incorrect asset passed.");
+
             let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&repay_amount.resource_address());
             match optional_lending_pool {
                 Some (lending_pool) => { // If it matches it means that the lending pool exists.
-                    lending_pool.flash_repay(repay_amount, flash_loan);
+                    self.access_badge_vault.authorize(|| 
+                        lending_pool.flash_repay(repay_amount));
+                    self.flash_loan_auth_vault.authorize(|| flash_loan.burn());
                     let degen_token = self.degen_token_vault.take(1);
                     degen_token
                 }
                 None => { 
                     info!("[DegenFi]: Pool for {:?} doesn't exist.", repay_amount.resource_address());
+                    let empty_bucket1: Bucket = self.access_auth_vault.take(0);
+                    empty_bucket1
+                }
+            }
+        }
+
+        pub fn liquidate(
+            &mut self,
+            loan_id: NonFungibleId,
+            token_address: ResourceAddress,
+            repay_amount: Bucket
+        ) -> Bucket
+        {
+            let optional_lending_pool: Option<&LendingPool> = self.lending_pools.get(&token_address);
+            match optional_lending_pool {
+                Some (lending_pool) => { // If it matches it means that the lending pool exists.
+                    self.access_badge_vault.authorize(|| 
+                        lending_pool.liquidate(loan_id, token_address, repay_amount));
+                    let degen_token = self.degen_token_vault.take(1);
+                    degen_token
+                }
+                None => { 
+                    info!("[DegenFi]: Pool for {:?} doesn't exist.", token_address);
                     let empty_bucket1: Bucket = self.access_auth_vault.take(0);
                     empty_bucket1
                 }
@@ -1049,7 +1176,7 @@ blueprint! {
         /// It emits a message displaying the loan NFT ID and its Health Factor. In the future
         /// There will be more information that will be displayed.
         /// 
-        /// This method performs a number of checks before the repayment is made:
+        /// This method performs a number of checks before the information is pulled:
         /// 
         /// * **Check 1:** Checks that there does not already exist a lending pool for given token.
         /// 
@@ -1259,15 +1386,17 @@ blueprint! {
         /// # Returns:
         /// 
         /// This method does not return any assets.
-        pub fn credit_score_test(
+        pub fn set_credit_score(
             &mut self,
             user_auth: Proof,
             credit_score: u64
         )
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
             let user_id = self.get_user(&user_auth);
             let user_management: UserManagement = self.user_management_address.into();
-            user_management.credit_score_test(user_id, credit_score);
+            user_management.set_credit_score(user_id, credit_score);
         }
 
         /// Allows user to pull their SBT data.
@@ -1289,6 +1418,9 @@ blueprint! {
             user_auth: Proof
         )
         {
+            // Checks if user belongs to this protocol.
+            assert_eq!(self.sbt_address.contains(&user_auth.resource_address()), true, "User does not belong to this protocol.");
+
             let user_id = self.get_user(&user_auth);
             let user_management: UserManagement = self.user_management_address.into();
             user_management.get_sbt_info(user_id);

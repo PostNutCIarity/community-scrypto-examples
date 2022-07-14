@@ -1,4 +1,4 @@
-CALL_METHOD ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "withdraw_by_amount" Decimal("3000") ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e");
-TAKE_FROM_WORKTOP_BY_AMOUNT Decimal("3000") ResourceAddress("03b1feb305c9ca25e4cc946e57c7ef86e25e187c68e98020b8846e") Bucket("bucket1");
-CALL_METHOD ComponentAddress("0229460c4bfc0cd0718ab3269d72985c851aa1986af72def403c90") "swap" Bucket("bucket1");
-CALL_METHOD_WITH_ALL_RESOURCES ComponentAddress("020d3869346218a5e8deaaf2001216dc00fcacb79fb43e30ded79a") "deposit_batch";
+CALL_METHOD ComponentAddress("021025cfda90adea21506170be47c67ec169e41dbbdd063d54d409") "withdraw_by_amount" Decimal("3000") ResourceAddress("03241c83126d6cab3dfc323cdf6bbe2607e8b4d9538a821898f65e");
+TAKE_FROM_WORKTOP_BY_AMOUNT Decimal("3000") ResourceAddress("03241c83126d6cab3dfc323cdf6bbe2607e8b4d9538a821898f65e") Bucket("bucket1");
+CALL_METHOD ComponentAddress("02753a651166a478a7c32fe29ae89dc1588e1758855197a939f52f") "swap" Bucket("bucket1");
+CALL_METHOD_WITH_ALL_RESOURCES ComponentAddress("021025cfda90adea21506170be47c67ec169e41dbbdd063d54d409") "deposit_batch";

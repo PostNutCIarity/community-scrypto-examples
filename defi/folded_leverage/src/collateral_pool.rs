@@ -8,7 +8,7 @@ blueprint! {
         // Vault for lending pool
         collateral_vaults: HashMap<ResourceAddress, Vault>,
         user_management: ComponentAddress,
-        access_vault: Vault,
+        access_badge_vault: Vault,
         lending_pool: ComponentAddress,
     }
 
@@ -21,6 +21,9 @@ blueprint! {
         ) -> ComponentAddress 
         {
             let access_rules: AccessRules = AccessRules::new()
+            .method("convert_from_deposit", rule!(require(access_badge.resource_address())))
+            .method("convert_to_deposit", rule!(require(access_badge.resource_address())))
+            .method("redeem", rule!(require(access_badge.resource_address())))
             .method("withdraw_vault", rule!(require(access_badge.resource_address())))
             .default(rule!(allow_all));
 
@@ -40,7 +43,7 @@ blueprint! {
             let collateral_pool: ComponentAddress = Self {
                 collateral_vaults: collateral_vaults,
                 user_management: user_management_address,
-                access_vault: Vault::with_bucket(access_badge),
+                access_badge_vault: Vault::with_bucket(access_badge),
                 lending_pool: lending_pool_address,
             }
             .instantiate()
@@ -64,7 +67,7 @@ blueprint! {
 
             let dec_deposit_amount = deposit_amount.amount();
 
-            self.access_vault.authorize(|| {user_management.add_collateral_balance(user_id, token_address, dec_deposit_amount);});
+            self.access_badge_vault.authorize(|| {user_management.add_collateral_balance(user_id, token_address, dec_deposit_amount);});
 
             // Deposits collateral into the vault
             self.collateral_vaults.get_mut(&deposit_amount.resource_address()).unwrap().put(deposit_amount);
@@ -92,7 +95,7 @@ blueprint! {
             let dec_deposit_amount = deposit_amount.amount();
 
             // Updates the states
-            self.access_vault.authorize(|| {user_management.add_collateral_balance(user_id, token_address, dec_deposit_amount);});
+            self.access_badge_vault.authorize(|| {user_management.add_collateral_balance(user_id, token_address, dec_deposit_amount);});
             loan_nft_data.collateral_amount += dec_deposit_amount;
 
             // Deposits collateral into the vault
@@ -112,7 +115,7 @@ blueprint! {
 
             let dec_collateral_amount = collateral_amount.amount();
 
-            self.access_vault.authorize(|| {user_management.convert_deposit_to_collateral(user_id, token_address, dec_collateral_amount)});
+            self.access_badge_vault.authorize(|| {user_management.convert_deposit_to_collateral(user_id, token_address, dec_collateral_amount)});
             // Deposits collateral into the vault
             self.collateral_vaults.get_mut(&collateral_amount.resource_address()).unwrap().put(collateral_amount);
         }
@@ -163,7 +166,7 @@ blueprint! {
             let vault: &mut Vault = self.collateral_vaults.get_mut(&resource_address).unwrap();
             assert!(
                 vault.amount() >= amount,
-                "[Withdraw]: Not enough liquidity available for the withdraw."
+                "[Withdraw]: Not enough liquidity available for the withdraw. The liquidity is {:?}", vault.amount()
             );
             
 
@@ -210,7 +213,8 @@ blueprint! {
             let addresses: Vec<ResourceAddress> = self.addresses();
             let bucket: Bucket = self.withdraw(addresses[0], deposit_amount);
             let lending_pool: LendingPool = self.lending_pool.into();
-            lending_pool.convert_from_collateral(user_id, token_address, bucket);
+            self.access_badge_vault.authorize(|| 
+                lending_pool.convert_from_collateral(user_id, token_address, bucket));
         }
 
         /// Removes the percentage of the liquidity owed to this liquidity provider.
@@ -260,7 +264,7 @@ blueprint! {
             }
 
             // Reduce deposit balance of the user
-            self.access_vault.authorize(|| {user_management.decrease_deposit_balance(user_id, token_address, redeem_amount)});
+            self.access_badge_vault.authorize(|| {user_management.decrease_deposit_balance(user_id, token_address, redeem_amount)});
 
             // Withdrawing the amount of tokens owed to this lender
             let addresses: Vec<ResourceAddress> = self.addresses();

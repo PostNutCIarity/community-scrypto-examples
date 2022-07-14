@@ -39,6 +39,7 @@ pub struct Loan {
     pub collateral: ResourceAddress,
     pub principal_loan_amount: Decimal,
     pub interest_rate: Decimal,
+    pub origination_fee: Decimal,
     pub owner: NonFungibleId,
     #[scrypto(mutable)]
     pub remaining_balance: Decimal,

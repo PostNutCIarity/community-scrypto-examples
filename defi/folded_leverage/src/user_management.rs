@@ -28,25 +28,25 @@ blueprint! {
     /// are proper access controls to updating the User NFT. 
     impl UserManagement {
         pub fn new(
-            allowed: ResourceAddress
+            access_badge_address: ResourceAddress
         ) -> ComponentAddress
         {
             let access_rules: AccessRules = AccessRules::new()
-            .method("new_user", rule!(require(allowed)))
-            .method("inc_credit_score", rule!(require(allowed)))
-            .method("dec_credit_score", rule!(require(allowed)))
-            .method("add_deposit_balance", rule!(require(allowed)))
-            .method("decrease_deposit_balance", rule!(require(allowed)))
-            .method("increase_borrow_balance", rule!(require(allowed)))
-            .method("decrease_borrow_balance", rule!(require(allowed)))
-            .method("add_collateral_balance", rule!(require(allowed)))
-            .method("decrease_collateral_balance", rule!(require(allowed)))
-            .method("inc_paid_off", rule!(require(allowed)))
-            .method("inc_default", rule!(require(allowed)))
-            .method("insert_loan", rule!(require(allowed)))
-            .method("close_loan", rule!(require(allowed)))
-            .method("convert_deposit_to_collateral", rule!(require(allowed)))
-            .method("convert_collateral_to_deposit", rule!(require(allowed)))
+            .method("new_user", rule!(require(access_badge_address)))
+            .method("inc_credit_score", rule!(require(access_badge_address)))
+            .method("dec_credit_score", rule!(require(access_badge_address)))
+            .method("add_deposit_balance", rule!(require(access_badge_address)))
+            .method("decrease_deposit_balance", rule!(require(access_badge_address)))
+            .method("increase_borrow_balance", rule!(require(access_badge_address)))
+            .method("decrease_borrow_balance", rule!(require(access_badge_address)))
+            .method("add_collateral_balance", rule!(require(access_badge_address)))
+            .method("decrease_collateral_balance", rule!(require(access_badge_address)))
+            .method("inc_paid_off", rule!(require(access_badge_address)))
+            .method("inc_default", rule!(require(access_badge_address)))
+            .method("insert_loan", rule!(require(access_badge_address)))
+            .method("close_loan", rule!(require(access_badge_address)))
+            .method("convert_deposit_to_collateral", rule!(require(access_badge_address)))
+            .method("convert_collateral_to_deposit", rule!(require(access_badge_address)))
             .default(rule!(allow_all));
 
             // Badge that will be stored in the component's vault to provide authorization to update the User NFT.
@@ -75,10 +75,27 @@ blueprint! {
             .globalize()
         }
 
-        // Creates a new user for the lending protocol.
-        // User is created to track the deposit balance, borrow balance, and the token of each.
-        // Token is registered by extracting the resource address of the token they deposited.
-        // Users are not given a badge. Badge is used by the protocol to update the state. Users are given an NFT to identify as a user.
+        /// Creates a new user for the lending protocol.
+        /// 
+        /// This method is used to create a new user for DegenFi. A "Soul Bound Token" (SBT) is
+        /// created and sent to the user's wallet which cannot be transferred or burnt. The SBT tracks
+        /// user interactions within the protocol. Its major use case is to attempt to create a borrowing
+        /// track record to underwrite the user's credit worthines. The user has to submit their
+        /// wallet's component address to prevent the creation of multiple SBTs. Most of the protocol's
+        /// method will require users to submit a proof of their SBT in order to use the protocol. 
+        /// 
+        /// This method performs a few checks before a new user is created, these are:
+        /// 
+        /// * **Check 1:** Checks whether the wallet address submitted has already been submitted or not. 
+        /// 
+        /// # Arguments: 
+        /// 
+        /// * `account_address` (ComponentAddress) - The user's wallet address to ensure the user cannot create multiple
+        /// SBTs.
+        /// 
+        /// # Returns:
+        /// 
+        /// * `Bucket` - This is the SBT the user receives from creating a new user.
         pub fn new_user(&mut self, account_address: ComponentAddress) -> Bucket {
 
             // Checks whether the account address has already registered an SBT
@@ -136,8 +153,20 @@ blueprint! {
             self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, sbt_data));
         }
 
-        /// Currently simply a way for other components to get the resource address of the NFT
-        /// so that it can take informationa bout the NFT itself.
+        /// Gets the SBT resource address.
+        /// 
+        /// This method is used to retrieve the resource address of the SBT. It is used for other
+        /// Blueprints to view the SBT's data.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments: 
+        /// 
+        /// This method does not require any methods to be passed through.
+        /// 
+        /// # Returns:
+        /// 
+        /// This method does not return any assets.
         pub fn get_sbt(
             &self
         ) -> ResourceAddress 
@@ -170,8 +199,8 @@ blueprint! {
         {
             // Check if deposit withdrawal request has no lien
             let resource_manager = borrow_resource_manager!(self.sbt_address);
-            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-            return assert_eq!(nft_data.borrow_balance.get(&token_requested).unwrap_or(&Decimal::zero()), &Decimal::zero(), "User need to repay loan")
+            let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+            return assert_eq!(sbt_data.borrow_balance.get(&token_requested).unwrap_or(&Decimal::zero()), &Decimal::zero(), "User need to repay loan")
         }
 
         pub fn inc_credit_score(
@@ -206,13 +235,30 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        /// Adds the deposit balance
-        /// Checks if the user already a record of the resource or not
-        /// Requires a NonFungibleId so the method knows which NFT to update the data
-        /// The lending pool deposit method mints a transient resource that contains the amount that has been deposited to the pool
-        /// The transient resource address is then registered to this component where add_deposit_balance checks whether the transient resource token that has been passed
-        /// Is the same as the transient resource that was created in the lending pool component
-        /// The NFT data is then updated and the transient resource is burnt.
+        /// Adds the deposit balance of the User SBT.
+        /// 
+        /// 
+        /// 
+        /// 
+        /// This method performs a few checks before the borrow balance increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
+        /// 
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_id` (NonFungibleId) - The NonFungibleId that identifies the specific NFT which represents the user. It is used 
+        /// to update the data of the NFT.
+        /// 
+        /// * `address` (ResourceAddress) - This is the token address of the borrow balance that needs to be updated.
+        /// 
+        /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
+        /// 
+        /// # Returns:
+        /// 
+        /// The method does not return any assets.
         pub fn add_deposit_balance(
             &mut self,
             user_id: NonFungibleId,
@@ -237,7 +283,30 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
-        /// Check and understand the logic here - 06/01/2022
+        /// Decreases the deposit balance of the User SBT.
+        /// 
+        /// 
+        /// 
+        /// 
+        /// This method performs a few checks before the borrow balance increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
+        /// 
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_id` (NonFungibleId) - The NonFungibleId that identifies the specific NFT which represents the user. It is used 
+        /// to update the data of the NFT.
+        /// 
+        /// * `address` (ResourceAddress) - This is the token address of the borrow balance that needs to be updated.
+        /// 
+        /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
+        /// 
+        /// # Returns:
+        /// 
+        /// The method does not return any assets.
         pub fn decrease_deposit_balance(
             &mut self,
             user_id: NonFungibleId,
@@ -281,22 +350,21 @@ blueprint! {
         ) 
         {
             let resource_manager = borrow_resource_manager!(self.sbt_address);
-            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-            return assert!(nft_data.deposit_balance.contains_key(&address), "This token resource does not exist in your deposit balance.")
+            let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+            return assert!(sbt_data.deposit_balance.contains_key(&address), "This token resource does not exist in your deposit balance.")
         }
 
-        /// Adds the borrow balance of the User NFT.
+        /// Adds the borrow balance of the User SBT.
         /// 
-        /// # Description:
         /// 
         /// 
         /// 
         /// This method performs a few checks before the borrow balance increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
         /// 
-        /// * **Check 1:** Checks to ensure that the transient tokens passed do indeed belong to the pools of the protocol.
-        /// * **Check 2:** Checks to ensure that the amount in the transient token is the same amount that is required to update the
-        /// borrow balance.
-        /// * **Check 3:** Checks to ensure that the user belongs to this protocol.
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
         /// 
         /// # Arguments:
         /// 
@@ -307,14 +375,9 @@ blueprint! {
         /// 
         /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
         /// 
-        /// * `transient_token` (Bucket) - The transient token that is passed to this method is used to ensure that no one can
-        /// simply change the data of the NFT. The NFT data can only be changed by interacting with the pool. The pool methods will
-        /// mint a transient token to be sent to this method to ensure that the user has interacted with the pool to cause for the
-        /// NFT data to be updated.
-        /// 
         /// # Returns:
         /// 
-        /// * `None` - The method simply updates the User NFT
+        /// The method does not return any assets.
         pub fn increase_borrow_balance(
             &mut self,
             user_id: NonFungibleId,
@@ -339,9 +402,8 @@ blueprint! {
         }
 
 
-        /// Decreases the borrow balance of the User NFT.
+        /// Decreases the borrow balance of the User SBT.
         /// 
-        /// # Description:
         /// 
         /// 
         /// 
@@ -384,25 +446,49 @@ blueprint! {
 
             // Retrieves resource manager to find user 
             let resource_manager = borrow_resource_manager!(self.sbt_address);
-            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+            let mut sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
 
             // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
-            let borrow_balance = *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
+            let borrow_balance = *sbt_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
 
             if borrow_balance < repay_amount {
                 let to_return = repay_amount - borrow_balance;
-                let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-                *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) = Decimal::zero();
-                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
+                let mut update_sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+                *update_sbt_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) = Decimal::zero();
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_sbt_data));
                 return to_return
             }
             else {
-                *nft_data.borrow_balance.get_mut(&address).unwrap() -= repay_amount;
-                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+                *sbt_data.borrow_balance.get_mut(&address).unwrap() -= repay_amount;
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, sbt_data));
                 return Decimal::zero()
             };
         }
 
+        /// Increases the counter of paid off loans of the SBT User.
+        /// 
+        /// 
+        /// 
+        /// 
+        /// This method performs a few checks before the paid off counter increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
+        /// 
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_id` (NonFungibleId) - The NonFungibleId that identifies the specific NFT which represents the user. It is used 
+        /// to update the data of the NFT.
+        /// 
+        /// * `address` (ResourceAddress) - This is the token address of the borrow balance that needs to be updated.
+        /// 
+        /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
+        /// 
+        /// # Returns:
+        /// 
+        /// The method does not return any assets.
         pub fn inc_paid_off(
             &mut self,
             user_id: NonFungibleId
@@ -418,6 +504,30 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
+        /// Increases the default counter of the SBT User.
+        /// 
+        /// 
+        /// 
+        /// 
+        /// This method performs a few checks before the borrow balance increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
+        /// 
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_id` (NonFungibleId) - The NonFungibleId that identifies the specific NFT which represents the user. It is used 
+        /// to update the data of the NFT.
+        /// 
+        /// * `address` (ResourceAddress) - This is the token address of the borrow balance that needs to be updated.
+        /// 
+        /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
+        /// 
+        /// # Returns:
+        /// 
+        /// The method does not return any assets.
         pub fn inc_default(
             &mut self,
             user_id: NonFungibleId
@@ -516,10 +626,34 @@ blueprint! {
         )
         {
             let resource_manager = borrow_resource_manager!(self.sbt_address);
-            let nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-            return assert!(nft_data.borrow_balance.contains_key(&address), "This token resource does not exist in your borrow balance.")
+            let sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+            return assert!(sbt_data.borrow_balance.contains_key(&address), "This token resource does not exist in your borrow balance.")
         }
 
+        /// Converts the deposit balance to the collateral balance of the User SBT.
+        /// 
+        /// 
+        /// 
+        /// 
+        /// This method performs a few checks before the borrow balance increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
+        /// 
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_id` (NonFungibleId) - The NonFungibleId that identifies the specific NFT which represents the user. It is used 
+        /// to update the data of the NFT.
+        /// 
+        /// * `address` (ResourceAddress) - This is the token address of the borrow balance that needs to be updated.
+        /// 
+        /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
+        /// 
+        /// # Returns:
+        /// 
+        /// The method does not return any assets.
         pub fn convert_deposit_to_collateral(
             &mut self,
             user_id: NonFungibleId,
@@ -567,6 +701,30 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
+        /// Adds the borrow balance of the User SBT.
+        /// 
+        /// 
+        /// 
+        /// 
+        /// This method performs a few checks before the borrow balance increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
+        /// 
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_id` (NonFungibleId) - The NonFungibleId that identifies the specific NFT which represents the user. It is used 
+        /// to update the data of the NFT.
+        /// 
+        /// * `address` (ResourceAddress) - This is the token address of the borrow balance that needs to be updated.
+        /// 
+        /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
+        /// 
+        /// # Returns:
+        /// 
+        /// The method does not return any assets.
         pub fn add_collateral_balance(
             &mut self,
             user_id: NonFungibleId,
@@ -587,6 +745,30 @@ blueprint! {
             self.authorize_update(&user_id, sbt_data);
         }
 
+        /// Adds the borrow balance of the User SBT.
+        /// 
+        /// 
+        /// 
+        /// 
+        /// This method performs a few checks before the borrow balance increases.
+        ///
+        /// * **Check 1:** Checks that there is a user that exist for the NonFungibleId passed.
+        /// 
+        /// * **Check 2:** Checks if the user has borrowed from the resource address before, if not, inserts the resource address
+        /// and amount to the HashMap.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_id` (NonFungibleId) - The NonFungibleId that identifies the specific NFT which represents the user. It is used 
+        /// to update the data of the NFT.
+        /// 
+        /// * `address` (ResourceAddress) - This is the token address of the borrow balance that needs to be updated.
+        /// 
+        /// * `amount` (Decimal) - This is the amount of the borrow balance that needs to be updated.
+        /// 
+        /// # Returns:
+        /// 
+        /// The method does not return any assets.
         pub fn decrease_collateral_balance(
             &mut self,
             user_id: NonFungibleId,
@@ -598,33 +780,33 @@ blueprint! {
             self.assert_user_exist(&user_id);
             
             // Check lien - 06/01/22 - Make sure this makes sense
-            self.check_lien(&user_id, &address);
+            //self.check_lien(&user_id, &address);
 
             // Asserts that the user must have an existing borrow balance of the resource.
             self.assert_deposit_resource_exists(&user_id, &address);
 
             // Retrieves resource manager to find user 
             let resource_manager = borrow_resource_manager!(self.sbt_address);
-            let mut nft_data: User = resource_manager.get_non_fungible_data(&user_id);
+            let mut sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
 
             // If the repay amount is larger than the borrow balance, returns the excess to the user. Otherwise, balance simply reduces.
-            let mut borrow_balance = *nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
+            let mut borrow_balance = *sbt_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero());
 
             if borrow_balance < redeem_amount {
                 let to_return = redeem_amount - borrow_balance;
-                let mut update_nft_data: User = resource_manager.get_non_fungible_data(&user_id);
-                *update_nft_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) -= redeem_amount;
-                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_nft_data));
+                let mut update_sbt_data: User = resource_manager.get_non_fungible_data(&user_id);
+                *update_sbt_data.borrow_balance.get_mut(&address).unwrap_or(&mut Decimal::zero()) -= redeem_amount;
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, update_sbt_data));
                 return to_return
             }
             else {
                 borrow_balance -= redeem_amount;
-                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, nft_data));
+                self.sbt_badge_vault.authorize(|| resource_manager.update_non_fungible_data(&user_id, sbt_data));
                 return Decimal::zero()
             };
         }
 
-        pub fn credit_score_modifier(
+        pub fn interest_modifier(
             &self,
             user_id: NonFungibleId
         ) -> Decimal 
@@ -642,17 +824,63 @@ blueprint! {
             }
         }
 
-        pub fn credit_score_test(
+        pub fn collaterization_modifier(
+            &self,
+            user_id: NonFungibleId
+        ) -> Decimal 
+        {
+            let sbt_data = self.call_resource_mananger(&user_id);
+            let credit_score = sbt_data.credit_score;
+            if credit_score >= 100 && credit_score < 200 {
+                return dec!(".05")
+            } else if credit_score >= 200 && credit_score < 300 {
+                return dec!(".10")
+            } else if credit_score >= 300 {
+                return dec!(".15")
+            } else {
+                return dec!("0.0")
+            }
+        }
+
+        /// Allows user to add to their credit score.
+        ///
+        /// This method is used to allow users add to their credit score for demonstration purpose.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_auth` (Proof) - A proof that proves that the depositer is a user that belongs to this protocol.
+        /// * `credit_score` (u64) - The credit score amount user wants to add.
+        /// 
+        /// # Returns:
+        /// 
+        /// This method does not return any assets.
+        pub fn set_credit_score(
             &mut self,
             user_id: NonFungibleId,
             credit_score: u64
         )
         {
             let mut sbt_data = self.call_resource_mananger(&user_id);
-            sbt_data.credit_score += credit_score;
+            sbt_data.credit_score = credit_score;
             self.authorize_update(&user_id, sbt_data);
         }
 
+        /// Allows user to pull their SBT data.
+        ///
+        /// This method is used to allow users retrieve their SBT data. I suppose users cannot retrieve SBT data
+        /// of other users yet.
+        /// 
+        /// This method does not perform any checks.
+        /// 
+        /// # Arguments:
+        /// 
+        /// * `user_auth` (Proof) - A proof that proves that the depositer is a user that belongs to this protocol.
+        /// 
+        /// # Returns:
+        /// 
+        /// This method does not return any assets.
         pub fn get_sbt_info(
             &self,
             user_id: NonFungibleId
