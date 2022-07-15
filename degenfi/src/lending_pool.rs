@@ -586,6 +586,7 @@ blueprint! {
             // Check borrow percent
             // Retrieves the collateral 
             let loan_data = self.call_resource_mananger(&loan_id);
+            let loan_balance = loan_data.remaining_balance;
             let collateral_address = loan_data.collateral;
             let collateral_amount = loan_data.collateral_amount;
 
@@ -595,7 +596,7 @@ blueprint! {
             let collateral_value = collateral_amount * price;
 
             // Asserts the max borrow percentage
-            assert!(borrow_amount <= collateral_value * self.max_borrow, "Borrow amount must be less than or equals to 50% of your collateral.");
+            assert!((loan_balance + borrow_amount) <= collateral_value * self.max_borrow, "Borrow amount must be less than or equals to 50% of your collateral.");
 
             // Checks for open loan positions of this asset
             assert_eq!(sbt_data.open_loans.contains_key(&token_address), true, "Must have an open loan position of {:?}", token_address);
